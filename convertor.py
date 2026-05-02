@@ -7,21 +7,89 @@ import matplotlib.pyplot as plt
 import numpy as np
 import io
 from PIL import Image
-import cairosvg # NEW: For rendering SVGs
+import cairosvg 
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Universal File Converter", page_icon="🔄", layout="centered")
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="Universal File Converter Pro",
+    page_icon="⚡",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
+# --- 2. CUSTOM CSS (THE PRO LOOK) ---
 st.markdown("""
     <style>
-    .stButton>button { width: 100%; border-radius: 8px; font-weight: bold; }
-    .stDownloadButton>button { width: 100%; border-radius: 8px; background-color: #4CAF50; color: white; }
+    /* Hide Streamlit default header and footer */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    /* Background and typography spacing */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 800px;
+    }
+
+    /* Style the main title */
+    .main-title {
+        text-align: center;
+        font-weight: 800;
+        font-size: 2.5rem;
+        color: #1E293B;
+        margin-bottom: 0px;
+    }
+    
+    .sub-title {
+        text-align: center;
+        color: #64748B;
+        font-size: 1.1rem;
+        margin-bottom: 2rem;
+    }
+
+    /* Primary Action Button (Convert) */
+    .stButton>button {
+        width: 100%;
+        border-radius: 8px;
+        font-weight: 600;
+        height: 3rem;
+        background-color: #0F172A;
+        color: white;
+        border: none;
+        transition: all 0.2s ease-in-out;
+    }
+    .stButton>button:hover {
+        background-color: #334155;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+
+    /* Success Download Button */
+    .stDownloadButton>button {
+        width: 100%;
+        border-radius: 8px;
+        font-weight: 600;
+        height: 3.5rem;
+        background: linear-gradient(135deg, #10B981 0%, #059669 100%);
+        color: white;
+        border: none;
+        box-shadow: 0 4px 6px -1px rgba(16, 185, 129, 0.3);
+    }
+    .stDownloadButton>button:hover {
+        background: linear-gradient(135deg, #059669 0%, #047857 100%);
+        transform: translateY(-1px);
+    }
+
+    /* Styling Expander and Info boxes */
+    .stAlert {
+        border-radius: 8px;
+        border: none;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 1. RASTER TO ANYTHING ---
+# --- 3. CORE LOGIC (UNCHANGED) ---
 def process_raster(image_file, target_fmt, mode):
-    # Standard format conversion
     if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
         img = Image.open(image_file)
         if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
@@ -30,7 +98,6 @@ def process_raster(image_file, target_fmt, mode):
         img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
         return buf.getvalue()
         
-    # Raster to Vector (Tracing)
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     image = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
     _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
@@ -48,7 +115,6 @@ def process_raster(image_file, target_fmt, mode):
         doc.write(buf)
         return buf.getvalue().encode('utf-8')
 
-# --- 2. SVG TO RASTER ---
 def process_svg(file_bytes, target_fmt):
     if target_fmt == "PNG":
         return cairosvg.svg2png(bytestring=file_bytes)
@@ -57,58 +123,80 @@ def process_svg(file_bytes, target_fmt):
     else:
         raise ValueError("SVGs can currently only be converted to PNG or PDF.")
 
-# --- 3. DXF TO RASTER ---
 def process_dxf(file_bytes, target_fmt):
-    # Read the DXF math
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
     msp = doc.modelspace()
-    
-    # Use Matplotlib to draw the CAD math onto a blank canvas
     fig = plt.figure()
     ax = fig.add_axes([0, 0, 1, 1])
     ctx = RenderContext(doc)
     out = MatplotlibBackend(ax)
     Frontend(ctx, out).draw_layout(msp, finalize=True)
-    
-    # Save the canvas as an image
     buf = io.BytesIO()
     fig.savefig(buf, format=target_fmt.lower(), dpi=300)
     plt.close(fig)
     return buf.getvalue()
 
-# --- USER INTERFACE ---
-st.title("🔄 Ultimate Universal Converter")
-st.markdown("Convert Pixels to Vectors, Vectors to Pixels, and everything in between.")
+# --- 4. USER INTERFACE ---
 
-uploaded_file = st.file_uploader("Upload Image, SVG, or DXF", type=['png', 'jpg', 'jpeg', 'webp', 'svg', 'dxf'])
+# Header Section
+st.markdown('<p class="main-title">⚡ Nexus Converter</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">A professional suite to convert pixels, vectors, and documents instantly.</p>', unsafe_allow_html=True)
+
+# Step 1: Upload
+st.markdown("### 1. Select your file")
+uploaded_file = st.file_uploader("Drag and drop your file here", type=['png', 'jpg', 'jpeg', 'webp', 'svg', 'dxf'], label_visibility="collapsed")
 
 if uploaded_file:
     file_ext = uploaded_file.name.split('.')[-1].lower()
+    file_size_kb = uploaded_file.size / 1024
+    
+    # Show File Info in a clean container
+    with st.container():
+        st.success(f"**Ready:** {uploaded_file.name} ({file_size_kb:.1f} KB)")
     
     st.markdown("---")
-    st.subheader("Conversion Settings")
     
-    # Dynamically change available outputs based on input
-    if file_ext == 'svg':
-        available_formats = ["PNG", "PDF"]
-        st.info("💡 SVG detected. You can render this math file into a PNG image or PDF document.")
-    elif file_ext == 'dxf':
-        available_formats = ["PNG", "PDF", "SVG"]
-        st.info("📐 CAD file detected. This will be drawn and rendered as a 2D image.")
-    else:
-        available_formats = ["DXF", "SVG", "PNG", "JPG", "WEBP", "PDF"]
-        st.info("🖼️ Image detected. You can change its format or trace it into a Vector.")
-        
-    target_format = st.selectbox("Output Format", available_formats)
+    # Step 2: Configuration
+    st.markdown("### 2. Configure Output")
     
-    if st.button("🚀 Convert Now", use_container_width=True):
-        with st.spinner("Processing... (Vectors may take a few seconds to draw)"):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if file_ext == 'svg':
+            available_formats = ["PNG", "PDF"]
+            st.caption("SVG mode active")
+        elif file_ext == 'dxf':
+            available_formats = ["PNG", "PDF", "SVG"]
+            st.caption("CAD mode active")
+        else:
+            available_formats = ["DXF", "SVG", "PNG", "JPG", "WEBP", "PDF"]
+            st.caption("Standard image mode active")
+            
+        target_format = st.selectbox("Output Format", available_formats, label_visibility="collapsed")
+    
+    with col2:
+        if target_format in ["DXF", "SVG"] and file_ext not in ['dxf', 'svg']:
+            st.info("💡 Tracing algorithms will be applied to create vector lines.")
+        elif target_format in ["PNG", "JPG", "WEBP"] and file_ext in ['dxf', 'svg']:
+            st.info("💡 Mathematical paths will be rendered into a flat pixel image.")
+        else:
+            st.info("💡 Standard fast-pixel conversion will be applied.")
+
+    st.markdown("---")
+    
+    # Step 3: Action
+    st.markdown("### 3. Process")
+    
+    if st.button("Convert File"):
+        # The loading spinner
+        with st.status("Processing your file...", expanded=True) as status:
             try:
-                # Reset file pointer
+                st.write("Initializing engine...")
                 uploaded_file.seek(0)
                 file_bytes = uploaded_file.read()
                 
-                # Routing Engine
+                st.write(f"Converting {file_ext.upper()} to {target_format}...")
+                
                 if file_ext == 'svg':
                     output_bytes = process_svg(file_bytes, target_format)
                 elif file_ext == 'dxf':
@@ -120,15 +208,20 @@ if uploaded_file:
                 mime_type = "application/pdf" if target_format == "PDF" else f"image/{target_format.lower()}"
                 if target_format == "DXF": mime_type = "application/dxf"
                 
-                st.success("✅ Conversion successful!")
+                status.update(label="Conversion Complete!", state="complete", expanded=False)
+                
+                st.balloons() # Adds a nice celebratory touch for successful conversion
                 
                 original_name = uploaded_file.name.rsplit('.', 1)[0]
+                
+                # The big green download button
                 st.download_button(
-                    label=f"💾 Download {target_format}",
+                    label=f"💾 Download {target_format} File",
                     data=output_bytes,
                     file_name=f"{original_name}.{target_format.lower()}",
-                    mime=mime_type,
-                    use_container_width=True
+                    mime=mime_type
                 )
+                
             except Exception as e:
-                st.error(f"Error during conversion: {e}")
+                status.update(label="Conversion Failed", state="error", expanded=True)
+                st.error(f"Error details: {e}")
