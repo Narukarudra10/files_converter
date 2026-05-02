@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- 2. CUSTOM CSS (THE PRO LOOK) ---
+# --- 2. CUSTOM HTML/CSS (NAVBAR, FOOTER, & STYLING) ---
 st.markdown("""
     <style>
     /* Hide Streamlit default header and footer */
@@ -25,67 +25,108 @@ st.markdown("""
     footer {visibility: hidden;}
     header {visibility: hidden;}
 
-    /* Background and typography spacing */
+    /* ----------------------------------- */
+    /* NAVBAR & FOOTER CSS                 */
+    /* ----------------------------------- */
+    .custom-navbar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        background-color: #0F172A;
+        color: white;
+        padding: 15px 30px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        z-index: 99999;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    }
+    .navbar-brand { 
+        font-weight: 800; 
+        font-size: 1.2rem; 
+        letter-spacing: 1px;
+    }
+    .navbar-links { 
+        font-size: 0.9rem; 
+        color: #cbd5e1; 
+        font-weight: 500;
+    }
+    .navbar-links span {
+        margin-left: 20px;
+        cursor: pointer;
+    }
+    .navbar-links span:hover {
+        color: white;
+    }
+
+    .custom-footer {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        background-color: #0F172A;
+        color: #64748B;
+        text-align: center;
+        padding: 12px 0;
+        font-size: 0.85rem;
+        z-index: 99999;
+        border-top: 1px solid #1E293B;
+    }
+
+    /* ----------------------------------- */
+    /* MAIN APP STYLING                    */
+    /* ----------------------------------- */
+    
+    /* Push the main container down so the navbar doesn't cover the title */
     .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
+        padding-top: 6rem !important;
+        padding-bottom: 6rem !important;
         max-width: 800px;
     }
 
-    /* Style the main title */
     .main-title {
         text-align: center;
         font-weight: 800;
         font-size: 2.5rem;
-        color: #1E293B;
+        color: var(--text-color); 
         margin-bottom: 0px;
     }
     
     .sub-title {
         text-align: center;
-        color: #64748B;
+        color: gray;
         font-size: 1.1rem;
         margin-bottom: 2rem;
     }
 
-    /* Primary Action Button (Convert) */
-    .stButton>button {
-        width: 100%;
-        border-radius: 8px;
-        font-weight: 600;
-        height: 3rem;
-        background-color: #0F172A;
-        color: white;
-        border: none;
-        transition: all 0.2s ease-in-out;
-    }
-    .stButton>button:hover {
-        background-color: #334155;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    }
-
-    /* Success Download Button */
     .stDownloadButton>button {
-        width: 100%;
         border-radius: 8px;
         font-weight: 600;
         height: 3.5rem;
         background: linear-gradient(135deg, #10B981 0%, #059669 100%);
         color: white;
         border: none;
-        box-shadow: 0 4px 6px -1px rgba(16, 185, 129, 0.3);
     }
     .stDownloadButton>button:hover {
         background: linear-gradient(135deg, #059669 0%, #047857 100%);
-        transform: translateY(-1px);
-    }
-
-    /* Styling Expander and Info boxes */
-    .stAlert {
-        border-radius: 8px;
-        border: none;
     }
     </style>
+
+    <!-- INJECT NAVBAR HTML -->
+    <div class="custom-navbar">
+        <div class="navbar-brand">⚡ NEXUS</div>
+        <div class="navbar-links">
+            <span>Home</span>
+            <span>API Docs</span>
+            <span>Support</span>
+        </div>
+    </div>
+
+    <!-- INJECT FOOTER HTML -->
+    <div class="custom-footer">
+        &copy; 2026 Nexus Tools. Secure, local, and fast conversions.
+    </div>
 """, unsafe_allow_html=True)
 
 # --- 3. CORE LOGIC (UNCHANGED) ---
@@ -138,11 +179,9 @@ def process_dxf(file_bytes, target_fmt):
 
 # --- 4. USER INTERFACE ---
 
-# Header Section
-st.markdown('<p class="main-title">⚡ Nexus Converter</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-title">Nexus Converter</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">A professional suite to convert pixels, vectors, and documents instantly.</p>', unsafe_allow_html=True)
 
-# Step 1: Upload
 st.markdown("### 1. Select your file")
 uploaded_file = st.file_uploader("Drag and drop your file here", type=['png', 'jpg', 'jpeg', 'webp', 'svg', 'dxf'], label_visibility="collapsed")
 
@@ -150,13 +189,11 @@ if uploaded_file:
     file_ext = uploaded_file.name.split('.')[-1].lower()
     file_size_kb = uploaded_file.size / 1024
     
-    # Show File Info in a clean container
     with st.container():
         st.success(f"**Ready:** {uploaded_file.name} ({file_size_kb:.1f} KB)")
     
     st.markdown("---")
     
-    # Step 2: Configuration
     st.markdown("### 2. Configure Output")
     
     col1, col2 = st.columns(2)
@@ -184,11 +221,9 @@ if uploaded_file:
 
     st.markdown("---")
     
-    # Step 3: Action
     st.markdown("### 3. Process")
     
-    if st.button("Convert File"):
-        # The loading spinner
+    if st.button("Convert File", use_container_width=True, type="primary"):
         with st.status("Processing your file...", expanded=True) as status:
             try:
                 st.write("Initializing engine...")
@@ -209,12 +244,10 @@ if uploaded_file:
                 if target_format == "DXF": mime_type = "application/dxf"
                 
                 status.update(label="Conversion Complete!", state="complete", expanded=False)
-                
-                st.balloons() # Adds a nice celebratory touch for successful conversion
+                st.balloons() 
                 
                 original_name = uploaded_file.name.rsplit('.', 1)[0]
                 
-                # The big green download button
                 st.download_button(
                     label=f"💾 Download {target_format} File",
                     data=output_bytes,
