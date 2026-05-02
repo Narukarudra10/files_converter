@@ -129,8 +129,9 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-# --- 3. CORE LOGIC (UNCHANGED) ---
+# --- 3. CORE LOGIC (UPDATED FOR 56x88mm EXACT SCALING) ---
 def process_raster(image_file, target_fmt, mode):
+    # Standard format conversion
     if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
         img = Image.open(image_file)
         if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
@@ -139,22 +140,52 @@ def process_raster(image_file, target_fmt, mode):
         img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
         return buf.getvalue()
         
+    # Raster to Vector (Tracing)
     file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
     image = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
     _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
     
+    if not contours:
+        raise ValueError("No shapes found in the image to convert.")
+
+    # --- EXACT DIMENSION SCALING LOGIC (56mm x 88mm) ---
+    all_points = np.vstack(contours)
+    x_min, y_min, pixel_w, pixel_h = cv2.boundingRect(all_points)
+
+    target_w_mm = 56.0
+    target_h_mm = 88.0
+
+    scale_x = target_w_mm / pixel_w
+    scale_y = target_h_mm / pixel_h
+
+    # Vector Output Generation
     if target_fmt == "DXF":
         doc = ezdxf.new('R2010')
+        doc.header['$INSUNITS'] = 4  # Explicitly tell CAD software this is in Millimeters
         msp = doc.modelspace()
+        
         if hierarchy is not None:
             for cnt in contours:
-                points = [(pt[0][0], -pt[0][1]) for pt in cnt]
+                points = [((pt[0][0] - x_min) * scale_x, -((pt[0][1] - y_min) * scale_y)) for pt in cnt]
                 if len(points) >= 3:
                     msp.add_lwpolyline(points, close=True)
         buf = io.StringIO()
         doc.write(buf)
         return buf.getvalue().encode('utf-8')
+        
+    elif target_fmt == "SVG":
+        svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" width="56mm" height="88mm" viewBox="0 0 {target_w_mm} {target_h_mm}">']
+        if hierarchy is not None:
+            for cnt in contours:
+                if len(cnt) >= 3:
+                    path_points = [f"{(pt[0][0] - x_min) * scale_x},{(pt[0][1] - y_min) * scale_y}" for pt in cnt]
+                    path_data = "M " + " L ".join(path_points) + " Z"
+                    fill = "none" if "Outlines" in mode else "black"
+                    stroke = "black" if "Outlines" in mode else "none"
+                    svg_lines.append(f'<path d="{path_data}" fill="{fill}" stroke="{stroke}" stroke-width="0.1"/>')
+        svg_lines.append('</svg>')
+        return "\n".join(svg_lines).encode('utf-8')
 
 def process_svg(file_bytes, target_fmt):
     if target_fmt == "PNG":
@@ -213,7 +244,7 @@ if uploaded_file:
     
     with col2:
         if target_format in ["DXF", "SVG"] and file_ext not in ['dxf', 'svg']:
-            st.info("💡 Tracing algorithms will be applied to create vector lines.")
+            st.info("💡 Tracing algorithms will be applied to create vector lines scaled to exactly 56x88mm.")
         elif target_format in ["PNG", "JPG", "WEBP"] and file_ext in ['dxf', 'svg']:
             st.info("💡 Mathematical paths will be rendered into a flat pixel image.")
         else:
