@@ -6,7 +6,7 @@ from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 import matplotlib.pyplot as plt
 import numpy as np
 import io
-from PIL import Image
+from PIL import Image, ImageOps # ImageOps added for EXIF fix
 import cairosvg 
 import zipfile 
 
@@ -85,16 +85,22 @@ st.markdown("""
 
 # --- 3. CORE LOGIC ---
 def process_raster(image_file, target_fmt, mode):
+    # EXIF FIX: Open image and permanently fix rotation based on camera sensor data
+    img = Image.open(image_file)
+    img = ImageOps.exif_transpose(img) 
+
+    # 1. Standard format conversion
     if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
-        img = Image.open(image_file)
         if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         buf = io.BytesIO()
         img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
         return buf.getvalue()
         
-    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
+    # 2. Vector Tracing Engine
+    # Convert fixed Pillow image back into OpenCV array format for contour tracing
+    img_gray = img.convert("L")
+    image = np.array(img_gray)
     
     if "Clean" in mode:
         _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
@@ -162,11 +168,10 @@ st.markdown('<p class="sub-title">A professional suite to convert pixels, vector
 
 st.markdown("### 1. Select your files")
 
-# We clear the download memory if they upload new files
 def reset_download():
     st.session_state.download_ready = False
 
-uploaded_files = st.file_uploader("Drag and drop your files here", type=['png', 'jpg', 'jpeg', 'webp', 'svg', 'dxf'], accept_multiple_files=True, label_visibility="collapsed", on_change=reset_download)
+uploaded_files = st.file_uploader("Drag and drop your files here", type=['png', 'jpg', 'jpeg', 'webp', 'bmp', 'svg', 'dxf'], accept_multiple_files=True, label_visibility="collapsed", on_change=reset_download)
 
 if uploaded_files:
     exts = set([f.name.split('.')[-1].lower() for f in uploaded_files])
@@ -199,9 +204,8 @@ if uploaded_files:
     st.markdown("---")
     st.markdown("### 3. Process Batch")
     
-    # CONVERT BUTTON
     if st.button("⚙️ Convert Files", use_container_width=True):
-        st.session_state.download_ready = False # Reset before starting
+        st.session_state.download_ready = False 
         
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
@@ -215,7 +219,10 @@ if uploaded_files:
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
                         if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
+                            # Apply EXIF rotation fix to PDF pages too!
                             img = Image.open(uploaded_file)
+                            img = ImageOps.exif_transpose(img)
+                            
                             if img.mode in ("RGBA", "P"):
                                 img = img.convert("RGB")
                             images_for_pdf.append(img)
@@ -226,7 +233,6 @@ if uploaded_files:
                         pdf_buffer = io.BytesIO()
                         images_for_pdf[0].save(pdf_buffer, format="PDF", save_all=True, append_images=images_for_pdf[1:])
                         
-                        # SAVE TO MEMORY (st.session_state)
                         st.session_state.file_data = pdf_buffer.getvalue()
                         st.session_state.file_name = "nexus_combined_document.pdf"
                         st.session_state.mime_type = "application/pdf"
@@ -267,7 +273,6 @@ if uploaded_files:
                             zip_file.writestr(new_filename, output_bytes)
                             success_count += 1
                     
-                    # SAVE TO MEMORY (st.session_state)
                     if len(uploaded_files) == 1:
                         st.session_state.file_data = output_bytes
                         st.session_state.file_name = new_filename
