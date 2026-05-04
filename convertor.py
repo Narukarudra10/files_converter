@@ -18,7 +18,15 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- 2. CUSTOM HTML/CSS (NAVBAR, FOOTER, & STYLING) ---
+# --- INITIALIZE MEMORY FOR DOWNLOAD BUG FIX ---
+if 'download_ready' not in st.session_state:
+    st.session_state.download_ready = False
+    st.session_state.file_data = None
+    st.session_state.file_name = ""
+    st.session_state.mime_type = ""
+    st.session_state.button_label = ""
+
+# --- 2. CUSTOM HTML/CSS ---
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -57,9 +65,9 @@ st.markdown("""
     }
 
     .stDownloadButton>button {
-        border-radius: 8px; font-weight: 600; height: 3.5rem;
+        border-radius: 8px; font-weight: 600; height: 3.5rem; width: 100%;
         background: linear-gradient(135deg, #10B981 0%, #059669 100%);
-        color: white; border: none;
+        color: white; border: none; margin-top: 10px;
     }
     .stDownloadButton>button:hover {
         background: linear-gradient(135deg, #059669 0%, #047857 100%);
@@ -153,7 +161,12 @@ st.markdown('<p class="main-title">Nexus Converter</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">A professional suite to convert pixels, vectors, and documents instantly.</p>', unsafe_allow_html=True)
 
 st.markdown("### 1. Select your files")
-uploaded_files = st.file_uploader("Drag and drop your files here", type=['png', 'jpg', 'jpeg', 'webp', 'svg', 'dxf'], accept_multiple_files=True, label_visibility="collapsed")
+
+# We clear the download memory if they upload new files
+def reset_download():
+    st.session_state.download_ready = False
+
+uploaded_files = st.file_uploader("Drag and drop your files here", type=['png', 'jpg', 'jpeg', 'webp', 'svg', 'dxf'], accept_multiple_files=True, label_visibility="collapsed", on_change=reset_download)
 
 if uploaded_files:
     exts = set([f.name.split('.')[-1].lower() for f in uploaded_files])
@@ -167,7 +180,7 @@ if uploaded_files:
     col1, col2 = st.columns(2)
     with col1:
         available_formats = ["DXF", "SVG", "PNG", "JPG", "WEBP", "PDF"]
-        target_format = st.selectbox("Convert All Files To:", available_formats)
+        target_format = st.selectbox("Convert All Files To:", available_formats, on_change=reset_download)
     
     with col2:
         is_vector = target_format in ["DXF", "SVG"]
@@ -175,7 +188,8 @@ if uploaded_files:
             "Vector Tracing Style:", 
             ["Clean Digital Graphics", "Photos / Shadows", "Outlines Only (Edge)"],
             disabled=not is_vector,
-            help="Only applies when converting images to vectors."
+            help="Only applies when converting images to vectors.",
+            on_change=reset_download
         )
         if target_format == "PDF" and len(uploaded_files) > 1:
             st.info("💡 Images will be combined into a single, multi-page PDF document.")
@@ -185,7 +199,10 @@ if uploaded_files:
     st.markdown("---")
     st.markdown("### 3. Process Batch")
     
-    if st.button("Convert Files", use_container_width=True, type="primary"):
+    # CONVERT BUTTON
+    if st.button("⚙️ Convert Files", use_container_width=True):
+        st.session_state.download_ready = False # Reset before starting
+        
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
                 # =========================================================
@@ -197,7 +214,6 @@ if uploaded_files:
                     
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
-                        # Ensure we only try to combine standard image formats
                         if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
                             img = Image.open(uploaded_file)
                             if img.mode in ("RGBA", "P"):
@@ -208,18 +224,17 @@ if uploaded_files:
 
                     if images_for_pdf:
                         pdf_buffer = io.BytesIO()
-                        # Save the first image, and append the rest as extra pages!
                         images_for_pdf[0].save(pdf_buffer, format="PDF", save_all=True, append_images=images_for_pdf[1:])
+                        
+                        # SAVE TO MEMORY (st.session_state)
+                        st.session_state.file_data = pdf_buffer.getvalue()
+                        st.session_state.file_name = "nexus_combined_document.pdf"
+                        st.session_state.mime_type = "application/pdf"
+                        st.session_state.button_label = f"💾 Download Combined PDF ({len(images_for_pdf)} pages)"
+                        st.session_state.download_ready = True
                         
                         status.update(label="Successfully created combined PDF document!", state="complete", expanded=False)
                         st.balloons()
-                        
-                        st.download_button(
-                            label=f"💾 Download Combined PDF ({len(images_for_pdf)} pages)",
-                            data=pdf_buffer.getvalue(),
-                            file_name="nexus_combined_document.pdf",
-                            mime="application/pdf"
-                        )
                     else:
                         status.update(label="No valid images found to combine.", state="error")
 
@@ -252,24 +267,31 @@ if uploaded_files:
                             zip_file.writestr(new_filename, output_bytes)
                             success_count += 1
                     
+                    # SAVE TO MEMORY (st.session_state)
+                    if len(uploaded_files) == 1:
+                        st.session_state.file_data = output_bytes
+                        st.session_state.file_name = new_filename
+                        st.session_state.mime_type = f"application/{target_format.lower()}"
+                        st.session_state.button_label = f"💾 Download {target_format} File"
+                    else:
+                        st.session_state.file_data = zip_buffer.getvalue()
+                        st.session_state.file_name = "nexus_batch_conversion.zip"
+                        st.session_state.mime_type = "application/zip"
+                        st.session_state.button_label = f"📦 Download ZIP ({success_count} files)"
+                    
+                    st.session_state.download_ready = True
                     status.update(label=f"Successfully converted {success_count} files!", state="complete", expanded=False)
                     st.balloons() 
-                    
-                    if len(uploaded_files) == 1:
-                        st.download_button(
-                            label=f"💾 Download {target_format} File",
-                            data=output_bytes,
-                            file_name=new_filename,
-                            mime=f"application/{target_format.lower()}"
-                        )
-                    else:
-                        st.download_button(
-                            label=f"📦 Download ZIP ({success_count} files)",
-                            data=zip_buffer.getvalue(),
-                            file_name="nexus_batch_conversion.zip",
-                            mime="application/zip"
-                        )
                     
             except Exception as e:
                 status.update(label="Conversion Failed", state="error", expanded=True)
                 st.error(f"Error details: {e}")
+
+    # --- THE DOWNLOAD BUTTON (SAFE FROM REFRESH BUG) ---
+    if st.session_state.download_ready:
+        st.download_button(
+            label=st.session_state.button_label,
+            data=st.session_state.file_data,
+            file_name=st.session_state.file_name,
+            mime=st.session_state.mime_type
+        )
