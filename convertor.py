@@ -21,85 +21,45 @@ st.set_page_config(
 # --- 2. CUSTOM HTML/CSS (NAVBAR, FOOTER, & STYLING) ---
 st.markdown("""
     <style>
-    /* Hide Streamlit default header and footer */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
 
     .custom-navbar {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        background-color: #0F172A;
-        color: white;
-        padding: 15px 30px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        z-index: 99999;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        position: fixed; top: 0; left: 0; width: 100%;
+        background-color: #0F172A; color: white; padding: 15px 30px;
+        display: flex; justify-content: space-between; align-items: center;
+        z-index: 99999; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
     }
-    .navbar-brand { 
-        font-weight: 800; 
-        font-size: 1.2rem; 
-        letter-spacing: 1px;
-    }
-    .navbar-links { 
-        font-size: 0.9rem; 
-        color: #cbd5e1; 
-        font-weight: 500;
-    }
-    .navbar-links span {
-        margin-left: 20px;
-        cursor: pointer;
-    }
-    .navbar-links span:hover {
-        color: white;
-    }
+    .navbar-brand { font-weight: 800; font-size: 1.2rem; letter-spacing: 1px; }
+    .navbar-links { font-size: 0.9rem; color: #cbd5e1; font-weight: 500; }
+    .navbar-links span { margin-left: 20px; cursor: pointer; }
+    .navbar-links span:hover { color: white; }
 
     .custom-footer {
-        position: fixed;
-        bottom: 0;
-        left: 0;
-        width: 100%;
-        background-color: #0F172A;
-        color: #64748B;
-        text-align: center;
-        padding: 12px 0;
-        font-size: 0.85rem;
-        z-index: 99999;
+        position: fixed; bottom: 0; left: 0; width: 100%;
+        background-color: #0F172A; color: #64748B; text-align: center;
+        padding: 12px 0; font-size: 0.85rem; z-index: 99999;
         border-top: 1px solid #1E293B;
     }
     
     .block-container {
-        padding-top: 6rem !important;
-        padding-bottom: 6rem !important;
+        padding-top: 6rem !important; padding-bottom: 6rem !important;
         max-width: 800px;
     }
 
     .main-title {
-        text-align: center;
-        font-weight: 800;
-        font-size: 2.5rem;
-        color: var(--text-color); 
-        margin-bottom: 0px;
+        text-align: center; font-weight: 800; font-size: 2.5rem;
+        color: var(--text-color); margin-bottom: 0px;
     }
-    
     .sub-title {
-        text-align: center;
-        color: gray;
-        font-size: 1.1rem;
-        margin-bottom: 2rem;
+        text-align: center; color: gray; font-size: 1.1rem; margin-bottom: 2rem;
     }
 
     .stDownloadButton>button {
-        border-radius: 8px;
-        font-weight: 600;
-        height: 3.5rem;
+        border-radius: 8px; font-weight: 600; height: 3.5rem;
         background: linear-gradient(135deg, #10B981 0%, #059669 100%);
-        color: white;
-        border: none;
+        color: white; border: none;
     }
     .stDownloadButton>button:hover {
         background: linear-gradient(135deg, #059669 0%, #047857 100%);
@@ -109,15 +69,10 @@ st.markdown("""
     <div class="custom-navbar">
         <div class="navbar-brand">⚡ NEXUS</div>
         <div class="navbar-links">
-            <span>Home</span>
-            <span>API Docs</span>
-            <span>Support</span>
+            <span>Home</span><span>API Docs</span><span>Support</span>
         </div>
     </div>
-
-    <div class="custom-footer">
-        &copy; 2026 Nexus Tools. Secure, local, and fast conversions.
-    </div>
+    <div class="custom-footer">&copy; 2026 Nexus Tools. Secure, local, and fast conversions.</div>
 """, unsafe_allow_html=True)
 
 # --- 3. CORE LOGIC ---
@@ -139,7 +94,7 @@ def process_raster(image_file, target_fmt, mode):
     elif "Photos" in mode:
         processed = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
         contour_mode = cv2.CHAIN_APPROX_NONE
-    else: # Outlines
+    else: 
         processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         
@@ -148,7 +103,6 @@ def process_raster(image_file, target_fmt, mode):
     if target_fmt == "DXF":
         doc = ezdxf.new('R2010')
         msp = doc.modelspace()
-        
         if hierarchy is not None:
             for cnt in contours:
                 points = [(pt[0][0], -pt[0][1]) for pt in cnt]
@@ -205,13 +159,12 @@ if uploaded_files:
     exts = set([f.name.split('.')[-1].lower() for f in uploaded_files])
     
     with st.container():
-        st.success(f"**Ready:** {len(uploaded_files)} file(s) selected for batch processing.")
+        st.success(f"**Ready:** {len(uploaded_files)} file(s) selected for processing.")
     
     st.markdown("---")
     st.markdown("### 2. Configure Output")
     
     col1, col2 = st.columns(2)
-    
     with col1:
         available_formats = ["DXF", "SVG", "PNG", "JPG", "WEBP", "PDF"]
         target_format = st.selectbox("Convert All Files To:", available_formats)
@@ -224,7 +177,9 @@ if uploaded_files:
             disabled=not is_vector,
             help="Only applies when converting images to vectors."
         )
-        if not is_vector:
+        if target_format == "PDF" and len(uploaded_files) > 1:
+            st.info("💡 Images will be combined into a single, multi-page PDF document.")
+        elif not is_vector:
             st.info("💡 Standard file conversion will be applied.")
 
     st.markdown("---")
@@ -233,49 +188,88 @@ if uploaded_files:
     if st.button("Convert Files", use_container_width=True, type="primary"):
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
-                zip_buffer = io.BytesIO()
-                success_count = 0
-                
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                # =========================================================
+                # SPECIAL CASE: COMBINE MULTIPLE IMAGES INTO A SINGLE PDF
+                # =========================================================
+                if target_format == "PDF" and len(uploaded_files) > 1:
+                    st.write("Combining images into a single multi-page PDF...")
+                    images_for_pdf = []
+                    
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
-                        st.write(f"Converting {uploaded_file.name} to {target_format}...")
-                        
-                        uploaded_file.seek(0)
-                        file_bytes = uploaded_file.read()
-                        
-                        if file_ext == 'svg':
-                            output_bytes = process_svg(file_bytes, target_format)
-                        elif file_ext == 'dxf':
-                            output_bytes = process_dxf(file_bytes, target_format)
+                        # Ensure we only try to combine standard image formats
+                        if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
+                            img = Image.open(uploaded_file)
+                            if img.mode in ("RGBA", "P"):
+                                img = img.convert("RGB")
+                            images_for_pdf.append(img)
                         else:
-                            uploaded_file.seek(0)
-                            output_bytes = process_raster(uploaded_file, target_format, vector_mode)
-                            
-                        original_name = uploaded_file.name.rsplit('.', 1)[0]
-                        new_filename = f"{original_name}.{target_format.lower()}"
+                            st.warning(f"Skipping {uploaded_file.name}: Only standard images can be stitched into a PDF.")
+
+                    if images_for_pdf:
+                        pdf_buffer = io.BytesIO()
+                        # Save the first image, and append the rest as extra pages!
+                        images_for_pdf[0].save(pdf_buffer, format="PDF", save_all=True, append_images=images_for_pdf[1:])
                         
-                        zip_file.writestr(new_filename, output_bytes)
-                        success_count += 1
-                
-                status.update(label=f"Successfully converted {success_count} files!", state="complete", expanded=False)
-                st.balloons() 
-                
-                if len(uploaded_files) == 1:
-                    st.download_button(
-                        label=f"💾 Download {target_format} File",
-                        data=output_bytes,
-                        file_name=new_filename,
-                        mime=f"application/{target_format.lower()}"
-                    )
+                        status.update(label="Successfully created combined PDF document!", state="complete", expanded=False)
+                        st.balloons()
+                        
+                        st.download_button(
+                            label=f"💾 Download Combined PDF ({len(images_for_pdf)} pages)",
+                            data=pdf_buffer.getvalue(),
+                            file_name="nexus_combined_document.pdf",
+                            mime="application/pdf"
+                        )
+                    else:
+                        status.update(label="No valid images found to combine.", state="error")
+
+                # =========================================================
+                # STANDARD CASE: INDIVIDUAL CONVERSION AND ZIP BUNDLING
+                # =========================================================
                 else:
-                    st.download_button(
-                        label=f"📦 Download ZIP ({success_count} files)",
-                        data=zip_buffer.getvalue(),
-                        file_name="nexus_batch_conversion.zip",
-                        mime="application/zip"
-                    )
-                
+                    zip_buffer = io.BytesIO()
+                    success_count = 0
+                    
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        for uploaded_file in uploaded_files:
+                            file_ext = uploaded_file.name.split('.')[-1].lower()
+                            st.write(f"Converting {uploaded_file.name} to {target_format}...")
+                            
+                            uploaded_file.seek(0)
+                            file_bytes = uploaded_file.read()
+                            
+                            if file_ext == 'svg':
+                                output_bytes = process_svg(file_bytes, target_format)
+                            elif file_ext == 'dxf':
+                                output_bytes = process_dxf(file_bytes, target_format)
+                            else:
+                                uploaded_file.seek(0)
+                                output_bytes = process_raster(uploaded_file, target_format, vector_mode)
+                                
+                            original_name = uploaded_file.name.rsplit('.', 1)[0]
+                            new_filename = f"{original_name}.{target_format.lower()}"
+                            
+                            zip_file.writestr(new_filename, output_bytes)
+                            success_count += 1
+                    
+                    status.update(label=f"Successfully converted {success_count} files!", state="complete", expanded=False)
+                    st.balloons() 
+                    
+                    if len(uploaded_files) == 1:
+                        st.download_button(
+                            label=f"💾 Download {target_format} File",
+                            data=output_bytes,
+                            file_name=new_filename,
+                            mime=f"application/{target_format.lower()}"
+                        )
+                    else:
+                        st.download_button(
+                            label=f"📦 Download ZIP ({success_count} files)",
+                            data=zip_buffer.getvalue(),
+                            file_name="nexus_batch_conversion.zip",
+                            mime="application/zip"
+                        )
+                    
             except Exception as e:
                 status.update(label="Conversion Failed", state="error", expanded=True)
                 st.error(f"Error details: {e}")
