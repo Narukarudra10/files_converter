@@ -97,18 +97,21 @@ def process_raster(image_file, target_fmt, mode):
         img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
         return buf.getvalue()
         
-    # 2. Vector Tracing Engine
+    # 2. Vector Tracing Engine with SMOOTHING
     img_gray = img.convert("L")
     image = np.array(img_gray)
     
+    # NEW: Apply Median Blur to round off the sharp pixel corners before tracing
+    smoothed_raster = cv2.medianBlur(image, 5) 
+    
     if "Clean" in mode:
-        _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
-        contour_mode = cv2.CHAIN_APPROX_NONE
+        _, processed = cv2.threshold(smoothed_raster, 150, 255, cv2.THRESH_BINARY_INV)
+        contour_mode = cv2.CHAIN_APPROX_SIMPLE # Changed to SIMPLE to reduce redundant line points
     elif "Photos" in mode:
-        processed = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-        contour_mode = cv2.CHAIN_APPROX_NONE
+        processed = cv2.adaptiveThreshold(smoothed_raster, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+        contour_mode = cv2.CHAIN_APPROX_SIMPLE
     else: 
-        processed = cv2.Canny(image, 100, 200)
+        processed = cv2.Canny(smoothed_raster, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
@@ -118,7 +121,12 @@ def process_raster(image_file, target_fmt, mode):
         msp = doc.modelspace()
         if hierarchy is not None:
             for cnt in contours:
-                points = [(pt[0][0], -pt[0][1]) for pt in cnt]
+                # NEW: Polygon Approximation. This removes the jagged stair-step effect.
+                # 0.005 means 0.5% error tolerance. Adjust this number (e.g. 0.01) if you want it even smoother.
+                epsilon = 0.005 * cv2.arcLength(cnt, True)
+                approx_points = cv2.approxPolyDP(cnt, epsilon, True)
+                
+                points = [(pt[0][0], -pt[0][1]) for pt in approx_points]
                 if len(points) >= 3:
                     msp.add_lwpolyline(points, close=True)
         buf = io.StringIO()
@@ -130,7 +138,11 @@ def process_raster(image_file, target_fmt, mode):
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}">']
         if hierarchy is not None:
             for cnt in contours:
-                points = cnt.reshape(-1, 2)
+                # Apply the same polygon smoothing to SVG web vectors
+                epsilon = 0.005 * cv2.arcLength(cnt, True)
+                approx_points = cv2.approxPolyDP(cnt, epsilon, True)
+                
+                points = approx_points.reshape(-1, 2)
                 if len(points) >= 3:
                     path_data = "M " + " L ".join([f"{x},{y}" for x, y in points]) + " Z"
                     fill = "none" if "Outlines" in mode else "black"
@@ -140,19 +152,16 @@ def process_raster(image_file, target_fmt, mode):
         return "\n".join(svg_lines).encode('utf-8')
 
 def process_svg(file_bytes, target_fmt, mode):
-    # If it's already an SVG, just return it
     if target_fmt == "SVG":
         return file_bytes
-    # Native Cairo conversions
     elif target_fmt == "PNG":
         return cairosvg.svg2png(bytestring=file_bytes)
     elif target_fmt == "PDF":
         return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
-        # MAGIC TRICK: For DXF, JPG, WEBP... render the SVG into a massive, crisp PNG in memory
+        # Render SVG to high-res PNG, then pass to process_raster to convert to DXF
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, scale=3.0) 
         pseudo_file = io.BytesIO(png_bytes)
-        # Pass that crisp PNG to our standard engine to trace it to DXF!
         return process_raster(pseudo_file, target_fmt, mode)
 
 def process_dxf(file_bytes, target_fmt):
