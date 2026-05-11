@@ -6,7 +6,7 @@ from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 import matplotlib.pyplot as plt
 import numpy as np
 import io
-from PIL import Image, ImageOps # ImageOps added for EXIF fix
+from PIL import Image, ImageOps 
 import cairosvg 
 import zipfile 
 
@@ -98,7 +98,6 @@ def process_raster(image_file, target_fmt, mode):
         return buf.getvalue()
         
     # 2. Vector Tracing Engine
-    # Convert fixed Pillow image back into OpenCV array format for contour tracing
     img_gray = img.convert("L")
     image = np.array(img_gray)
     
@@ -140,13 +139,21 @@ def process_raster(image_file, target_fmt, mode):
         svg_lines.append('</svg>')
         return "\n".join(svg_lines).encode('utf-8')
 
-def process_svg(file_bytes, target_fmt):
-    if target_fmt == "PNG":
+def process_svg(file_bytes, target_fmt, mode):
+    # If it's already an SVG, just return it
+    if target_fmt == "SVG":
+        return file_bytes
+    # Native Cairo conversions
+    elif target_fmt == "PNG":
         return cairosvg.svg2png(bytestring=file_bytes)
     elif target_fmt == "PDF":
         return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
-        raise ValueError("SVGs can currently only be converted to PNG or PDF.")
+        # MAGIC TRICK: For DXF, JPG, WEBP... render the SVG into a massive, crisp PNG in memory
+        png_bytes = cairosvg.svg2png(bytestring=file_bytes, scale=3.0) 
+        pseudo_file = io.BytesIO(png_bytes)
+        # Pass that crisp PNG to our standard engine to trace it to DXF!
+        return process_raster(pseudo_file, target_fmt, mode)
 
 def process_dxf(file_bytes, target_fmt):
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
@@ -219,7 +226,6 @@ if uploaded_files:
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
                         if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
-                            # Apply EXIF rotation fix to PDF pages too!
                             img = Image.open(uploaded_file)
                             img = ImageOps.exif_transpose(img)
                             
@@ -260,7 +266,7 @@ if uploaded_files:
                             file_bytes = uploaded_file.read()
                             
                             if file_ext == 'svg':
-                                output_bytes = process_svg(file_bytes, target_format)
+                                output_bytes = process_svg(file_bytes, target_format, vector_mode)
                             elif file_ext == 'dxf':
                                 output_bytes = process_dxf(file_bytes, target_format)
                             else:
@@ -292,7 +298,7 @@ if uploaded_files:
                 status.update(label="Conversion Failed", state="error", expanded=True)
                 st.error(f"Error details: {e}")
 
-    # --- THE DOWNLOAD BUTTON (SAFE FROM REFRESH BUG) ---
+    # --- THE DOWNLOAD BUTTON ---
     if st.session_state.download_ready:
         st.download_button(
             label=st.session_state.button_label,
