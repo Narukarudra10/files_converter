@@ -93,7 +93,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
     with Image.open(image_file) as img:
         img = ImageOps.exif_transpose(img) 
 
-        # 1. Standard format conversion
         if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
             if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
@@ -101,14 +100,11 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                 img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
                 return buf.getvalue()
             
-        # 2. Vector Tracing Preparation
         img_gray = img.convert("L")
         image = np.array(img_gray)
     
     img_area = image.shape[0] * image.shape[1]
     scale_factor = 1.0 
-    
-    # --- CLOUD MEMORY FIX: Dynamic Scaling ---
     MAX_SAFE_PIXELS = 4_000_000 
     
     if "Trace Bitmap" in mode:
@@ -142,11 +138,8 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
         epsilon_factor = 0.002
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
-
-    # STRICT OUTLINE LOGIC: Only fill if the specific Solid checkbox was ticked
     is_filled = "Solid" in mode
 
-    # 3. Vector Output Generation
     if target_fmt == "DXF":
         doc = ezdxf.new('R2010')
         msp = doc.modelspace()
@@ -154,17 +147,45 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
             for cnt in contours:
                 if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
                     continue
-                    
-                epsilon = epsilon_factor * cv2.arcLength(cnt, True)
-                approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                 
-                points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
-                if len(points) >= 3:
+                # --- NEW: TRUE SHAPE RECOGNITION ---
+                perimeter = cv2.arcLength(cnt, True)
+                area = cv2.contourArea(cnt)
+                is_perfect_circle = False
+                
+                # If we are in high precision mode, check if the shape is trying to be a circle
+                if "High Precision" in mode and perimeter > 0:
+                    circularity = 4 * np.pi * (area / (perimeter * perimeter))
+                    if circularity > 0.82:  # If it is 82% circular, assume it's a dot and make it perfect!
+                        (cx, cy), r = cv2.minEnclosingCircle(cnt)
+                        is_perfect_circle = True
+                
+                if is_perfect_circle:
+                    real_cx = cx / scale_factor
+                    real_cy = -cy / scale_factor
+                    real_r = r / scale_factor
+                    
                     if is_filled:
+                        # Draw a perfectly smooth mathematical boundary for the solid hatch
+                        angles = np.linspace(0, 2*np.pi, 72, endpoint=False)
+                        circle_points = [(real_cx + real_r*np.cos(a), real_cy + real_r*np.sin(a)) for a in angles]
                         hatch = msp.add_hatch(color=7)
-                        hatch.paths.add_polyline_path(points, is_closed=True)
+                        hatch.paths.add_polyline_path(circle_points, is_closed=True)
                     else:
-                        msp.add_lwpolyline(points, close=True)
+                        # Draw a true CAD mathematical CIRCLE entity!
+                        msp.add_circle(center=(real_cx, real_cy), radius=real_r)
+                else:
+                    # Not a circle? Fall back to standard tracing lines (for squares, logos, etc.)
+                    epsilon = epsilon_factor * perimeter
+                    approx_points = cv2.approxPolyDP(cnt, epsilon, True)
+                    points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
+                    
+                    if len(points) >= 3:
+                        if is_filled:
+                            hatch = msp.add_hatch(color=7)
+                            hatch.paths.add_polyline_path(points, is_closed=True)
+                        else:
+                            msp.add_lwpolyline(points, close=True)
                     
         with io.StringIO() as buf:
             doc.write(buf)
@@ -178,19 +199,34 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
             for cnt in contours:
                 if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
                     continue
-                    
-                epsilon = epsilon_factor * cv2.arcLength(cnt, True)
-                approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                 
-                points = approx_points.reshape(-1, 2)
-                if len(points) >= 3:
-                    path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
+                perimeter = cv2.arcLength(cnt, True)
+                area = cv2.contourArea(cnt)
+                is_perfect_circle = False
+                
+                if "High Precision" in mode and perimeter > 0:
+                    circularity = 4 * np.pi * (area / (perimeter * perimeter))
+                    if circularity > 0.82:
+                        (cx, cy), r = cv2.minEnclosingCircle(cnt)
+                        is_perfect_circle = True
+
+                fill_color = "black" if is_filled else "none"
+                stroke_color = "none" if is_filled else "black"
+
+                if is_perfect_circle:
+                    real_cx = cx / scale_factor
+                    real_cy = cy / scale_factor
+                    real_r = r / scale_factor
+                    # Write a true SVG <circle> tag instead of a bumpy path
+                    svg_lines.append(f'<circle cx="{real_cx:.4f}" cy="{real_cy:.4f}" r="{real_r:.4f}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
+                else:
+                    epsilon = epsilon_factor * perimeter
+                    approx_points = cv2.approxPolyDP(cnt, epsilon, True)
+                    points = approx_points.reshape(-1, 2)
                     
-                    # If Solid is not checked, it draws an empty shape with a black outline!
-                    fill = "black" if is_filled else "none"
-                    stroke = "none" if is_filled else "black"
-                    
-                    svg_lines.append(f'<path d="{path_data}" fill="{fill}" stroke="{stroke}" stroke-width="1"/>')
+                    if len(points) >= 3:
+                        path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
+                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
                     
         svg_lines.append('</svg>')
         svg_output = "\n".join(svg_lines).encode('utf-8')
@@ -212,13 +248,11 @@ def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
 def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
     msp = doc.modelspace()
-    
     fig = plt.figure()
     ax = fig.add_axes([0, 0, 1, 1])
     ctx = RenderContext(doc)
     out = MatplotlibBackend(ax)
     Frontend(ctx, out).draw_layout(msp, finalize=True)
-    
     with io.BytesIO() as buf:
         fig.savefig(buf, format=target_fmt.lower(), dpi=300)
         plt.close(fig)
@@ -260,8 +294,8 @@ if uploaded_files:
         vector_mode = st.selectbox(
             "Vector Tracing Style:", 
             [
+                "High Precision (Shape Recognition for QR/Dots)", 
                 "Trace Bitmap (Inkscape Quality Smooth Lines)", 
-                "High Precision (Best for QR & Scannable Dots)", 
                 "Clean Digital Graphics (Sharp Corners)", 
                 "Outlines Only (Edge Detection)"
             ],
@@ -270,7 +304,6 @@ if uploaded_files:
             on_change=reset_download
         )
         
-        # Now the Solid Fill toggle appears for DXF, SVG, and EPS!
         vector_fill = False
         if is_vector:
             vector_fill = st.checkbox("Solid Fill", value=False, help="Check to fill shapes solidly. Leave unchecked to generate empty cut outlines.", on_change=reset_download)
@@ -289,9 +322,7 @@ if uploaded_files:
         
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
-                # PDF Combiner Logic
                 if target_format == "PDF" and len(uploaded_files) > 1:
-                    st.write("Combining images into a single multi-page PDF...")
                     images_for_pdf = []
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
@@ -317,18 +348,13 @@ if uploaded_files:
                         st.balloons()
                     else:
                         status.update(label="No valid images found to combine.", state="error")
-
-                # Individual / Batch ZIP Logic
                 else:
                     zip_buffer = io.BytesIO()
                     success_count = 0
-                    
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                         for uploaded_file in uploaded_files:
                             try:
                                 file_ext = uploaded_file.name.split('.')[-1].lower()
-                                st.write(f"Converting {uploaded_file.name} to {target_format}...")
-                                
                                 uploaded_file.seek(0)
                                 file_bytes = uploaded_file.read()
                                 
@@ -342,10 +368,8 @@ if uploaded_files:
                                     
                                 original_name = uploaded_file.name.rsplit('.', 1)[0]
                                 new_filename = f"{original_name}.{target_format.lower()}"
-                                
                                 zip_file.writestr(new_filename, output_bytes)
                                 success_count += 1
-                                
                             except Exception as file_e:
                                 st.warning(f"Failed to process {uploaded_file.name}: {file_e}")
                     
@@ -367,7 +391,6 @@ if uploaded_files:
                         st.balloons() 
                     else:
                         status.update(label="No files were successfully converted.", state="error", expanded=True)
-                    
             except Exception as e:
                 status.update(label="Conversion Failed", state="error", expanded=True)
                 st.error(f"Critical error details: {e}")
