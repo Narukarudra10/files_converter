@@ -85,11 +85,9 @@ st.markdown("""
 
 # --- 3. CORE LOGIC ---
 def process_raster(image_file, target_fmt, mode):
-    # EXIF FIX: Open image and permanently fix rotation based on camera sensor data
     img = Image.open(image_file)
     img = ImageOps.exif_transpose(img) 
 
-    # 1. Standard format conversion
     if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
         if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
@@ -97,24 +95,33 @@ def process_raster(image_file, target_fmt, mode):
         img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
         return buf.getvalue()
         
-    # 2. Vector Tracing Engine
     img_gray = img.convert("L")
     image = np.array(img_gray)
     
-    # Configure exact mathematical precision based on the selected mode
-    if "Clean" in mode:
-        # NO BLURRING. We need crisp, perfectly straight lines for QR codes and logos.
+    scale_factor = 1.0 # Default scale
+    
+    # NEW: HIGH PRECISION MODE FOR QR CODES
+    if "High Precision" in mode:
+        # Upscale 4x to generate perfectly smooth curves without pixelation
+        scale_factor = 4.0
+        image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+        # Slight blur to anti-alias the upscaled edges
+        blurred = cv2.GaussianBlur(image, (3, 3), 0)
+        # Otsu's thresholding automatically finds the perfect black/white split
+        _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contour_mode = cv2.CHAIN_APPROX_SIMPLE
+        epsilon_factor = 0.0001 # Almost zero error tolerance for perfect circles
+
+    elif "Clean" in mode:
         _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.001 # Extremely tight approximation to preserve perfect corners
+        epsilon_factor = 0.001 
     elif "Photos" in mode:
-        # Slight blur helps smooth out bad lighting and noise in camera photos
         smoothed_raster = cv2.medianBlur(image, 3) 
         processed = cv2.adaptiveThreshold(smoothed_raster, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.005 # Looser approximation for organic/smooth smoothing
+        epsilon_factor = 0.005 
     else: 
-        # Outlines only
         processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.002
@@ -126,11 +133,11 @@ def process_raster(image_file, target_fmt, mode):
         msp = doc.modelspace()
         if hierarchy is not None:
             for cnt in contours:
-                # Apply the specific epsilon factor chosen by our mode rules above
                 epsilon = epsilon_factor * cv2.arcLength(cnt, True)
                 approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                 
-                points = [(pt[0][0], -pt[0][1]) for pt in approx_points]
+                # Divide coordinates by the scale factor to return shape to original size
+                points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
                 if len(points) >= 3:
                     msp.add_lwpolyline(points, close=True)
         buf = io.StringIO()
@@ -138,7 +145,8 @@ def process_raster(image_file, target_fmt, mode):
         return buf.getvalue().encode('utf-8')
         
     elif target_fmt == "SVG":
-        svg_w, svg_h = image.shape[1], image.shape[0]
+        # Divide canvas size by scale factor
+        svg_w, svg_h = int(image.shape[1] / scale_factor), int(image.shape[0] / scale_factor)
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}">']
         if hierarchy is not None:
             for cnt in contours:
@@ -147,7 +155,8 @@ def process_raster(image_file, target_fmt, mode):
                 
                 points = approx_points.reshape(-1, 2)
                 if len(points) >= 3:
-                    path_data = "M " + " L ".join([f"{x},{y}" for x, y in points]) + " Z"
+                    # Divide paths by scale factor
+                    path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
                     fill = "none" if "Outlines" in mode else "black"
                     stroke = "black" if "Outlines" in mode else "none"
                     svg_lines.append(f'<path d="{path_data}" fill="{fill}" stroke="{stroke}" stroke-width="1"/>')
@@ -162,7 +171,6 @@ def process_svg(file_bytes, target_fmt, mode):
     elif target_fmt == "PDF":
         return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
-        # Render SVG to high-res PNG, then pass to process_raster to convert to DXF
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, scale=3.0) 
         pseudo_file = io.BytesIO(png_bytes)
         return process_raster(pseudo_file, target_fmt, mode)
@@ -210,7 +218,7 @@ if uploaded_files:
         is_vector = target_format in ["DXF", "SVG"]
         vector_mode = st.selectbox(
             "Vector Tracing Style:", 
-            ["Clean Digital Graphics", "Photos / Shadows", "Outlines Only (Edge)"],
+            ["High Precision (Best for QR & Round Dots)", "Clean Digital Graphics", "Photos / Shadows", "Outlines Only (Edge)"],
             disabled=not is_vector,
             help="Only applies when converting images to vectors.",
             on_change=reset_download
@@ -238,7 +246,6 @@ if uploaded_files:
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
                         if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
-                            # Apply EXIF rotation fix to PDF pages too!
                             img = Image.open(uploaded_file)
                             img = ImageOps.exif_transpose(img)
                             
