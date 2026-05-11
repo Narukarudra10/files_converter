@@ -9,6 +9,7 @@ import io
 from PIL import Image, ImageOps 
 import cairosvg 
 import zipfile 
+from typing import List
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -68,9 +69,11 @@ st.markdown("""
         border-radius: 8px; font-weight: 600; height: 3.5rem; width: 100%;
         background: linear-gradient(135deg, #10B981 0%, #059669 100%);
         color: white; border: none; margin-top: 10px;
+        transition: transform 0.1s ease-in-out;
     }
     .stDownloadButton>button:hover {
         background: linear-gradient(135deg, #059669 0%, #047857 100%);
+        transform: translateY(-2px);
     }
     </style>
 
@@ -83,44 +86,47 @@ st.markdown("""
     <div class="custom-footer">&copy; 2026 Nexus Tools. Secure, local, and fast conversions.</div>
 """, unsafe_allow_html=True)
 
-# --- 3. CORE LOGIC ---
-def process_raster(image_file, target_fmt, mode):
-    img = Image.open(image_file)
-    img = ImageOps.exif_transpose(img) 
+# --- 3. CORE LOGIC ENGINE ---
 
-    if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
-        if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
-        return buf.getvalue()
-        
-    img_gray = img.convert("L")
-    image = np.array(img_gray)
+def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
+    """Processes raster images, handles EXIF rotation, formats, and vector tracing."""
+    with Image.open(image_file) as img:
+        img = ImageOps.exif_transpose(img) 
+
+        # 1. Standard format conversion
+        if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
+            if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            with io.BytesIO() as buf:
+                img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
+                return buf.getvalue()
+            
+        # 2. Vector Tracing Preparation
+        img_gray = img.convert("L")
+        image = np.array(img_gray)
     
-    scale_factor = 1.0 # Default scale
+    scale_factor = 1.0 
     
-    # NEW: HIGH PRECISION MODE FOR QR CODES
+    # Configure exact mathematical precision based on the selected mode
     if "High Precision" in mode:
-        # Upscale 4x to generate perfectly smooth curves without pixelation
         scale_factor = 4.0
         image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
-        # Slight blur to anti-alias the upscaled edges
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
-        # Otsu's thresholding automatically finds the perfect black/white split
         _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.0001 # Almost zero error tolerance for perfect circles
+        epsilon_factor = 0.0001 
 
     elif "Clean" in mode:
         _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.001 
+
     elif "Photos" in mode:
         smoothed_raster = cv2.medianBlur(image, 3) 
         processed = cv2.adaptiveThreshold(smoothed_raster, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.005 
+
     else: 
         processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
@@ -128,6 +134,7 @@ def process_raster(image_file, target_fmt, mode):
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
 
+    # 3. Vector Output Generation
     if target_fmt == "DXF":
         doc = ezdxf.new('R2010')
         msp = doc.modelspace()
@@ -136,18 +143,18 @@ def process_raster(image_file, target_fmt, mode):
                 epsilon = epsilon_factor * cv2.arcLength(cnt, True)
                 approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                 
-                # Divide coordinates by the scale factor to return shape to original size
                 points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
                 if len(points) >= 3:
                     msp.add_lwpolyline(points, close=True)
-        buf = io.StringIO()
-        doc.write(buf)
-        return buf.getvalue().encode('utf-8')
+                    
+        with io.StringIO() as buf:
+            doc.write(buf)
+            return buf.getvalue().encode('utf-8')
         
     elif target_fmt == "SVG":
-        # Divide canvas size by scale factor
         svg_w, svg_h = int(image.shape[1] / scale_factor), int(image.shape[0] / scale_factor)
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}">']
+        
         if hierarchy is not None:
             for cnt in contours:
                 epsilon = epsilon_factor * cv2.arcLength(cnt, True)
@@ -155,15 +162,16 @@ def process_raster(image_file, target_fmt, mode):
                 
                 points = approx_points.reshape(-1, 2)
                 if len(points) >= 3:
-                    # Divide paths by scale factor
                     path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
                     fill = "none" if "Outlines" in mode else "black"
                     stroke = "black" if "Outlines" in mode else "none"
                     svg_lines.append(f'<path d="{path_data}" fill="{fill}" stroke="{stroke}" stroke-width="1"/>')
+                    
         svg_lines.append('</svg>')
         return "\n".join(svg_lines).encode('utf-8')
 
-def process_svg(file_bytes, target_fmt, mode):
+def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
+    """Handles SVG inputs natively, or routes to raster engine for tracing."""
     if target_fmt == "SVG":
         return file_bytes
     elif target_fmt == "PNG":
@@ -171,22 +179,27 @@ def process_svg(file_bytes, target_fmt, mode):
     elif target_fmt == "PDF":
         return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
+        # Render SVG to high-res PNG, then pass to process_raster to convert to DXF/Raster
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, scale=3.0) 
-        pseudo_file = io.BytesIO(png_bytes)
-        return process_raster(pseudo_file, target_fmt, mode)
+        with io.BytesIO(png_bytes) as pseudo_file:
+            return process_raster(pseudo_file, target_fmt, mode)
 
-def process_dxf(file_bytes, target_fmt):
+def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
+    """Renders CAD files into standard rasters using Matplotlib."""
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
     msp = doc.modelspace()
+    
     fig = plt.figure()
     ax = fig.add_axes([0, 0, 1, 1])
     ctx = RenderContext(doc)
     out = MatplotlibBackend(ax)
     Frontend(ctx, out).draw_layout(msp, finalize=True)
-    buf = io.BytesIO()
-    fig.savefig(buf, format=target_fmt.lower(), dpi=300)
-    plt.close(fig)
-    return buf.getvalue()
+    
+    with io.BytesIO() as buf:
+        fig.savefig(buf, format=target_fmt.lower(), dpi=300)
+        plt.close(fig)
+        return buf.getvalue()
+
 
 # --- 4. USER INTERFACE ---
 
@@ -196,13 +209,18 @@ st.markdown('<p class="sub-title">A professional suite to convert pixels, vector
 st.markdown("### 1. Select your files")
 
 def reset_download():
+    """Callback to clear the session state when new files/options are selected."""
     st.session_state.download_ready = False
 
-uploaded_files = st.file_uploader("Drag and drop your files here", type=['png', 'jpg', 'jpeg', 'webp', 'bmp', 'svg', 'dxf'], accept_multiple_files=True, label_visibility="collapsed", on_change=reset_download)
+uploaded_files = st.file_uploader(
+    "Drag and drop your files here", 
+    type=['png', 'jpg', 'jpeg', 'webp', 'bmp', 'svg', 'dxf'], 
+    accept_multiple_files=True, 
+    label_visibility="collapsed", 
+    on_change=reset_download
+)
 
 if uploaded_files:
-    exts = set([f.name.split('.')[-1].lower() for f in uploaded_files])
-    
     with st.container():
         st.success(f"**Ready:** {len(uploaded_files)} file(s) selected for processing.")
     
@@ -246,20 +264,21 @@ if uploaded_files:
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
                         if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
-                            img = Image.open(uploaded_file)
-                            img = ImageOps.exif_transpose(img)
-                            
-                            if img.mode in ("RGBA", "P"):
-                                img = img.convert("RGB")
-                            images_for_pdf.append(img)
+                            # Safe context loading for individual images
+                            with Image.open(uploaded_file) as img:
+                                img = ImageOps.exif_transpose(img)
+                                if img.mode in ("RGBA", "P"):
+                                    img = img.convert("RGB")
+                                # We must copy the image data out of the context manager
+                                images_for_pdf.append(img.copy())
                         else:
                             st.warning(f"Skipping {uploaded_file.name}: Only standard images can be stitched into a PDF.")
 
                     if images_for_pdf:
-                        pdf_buffer = io.BytesIO()
-                        images_for_pdf[0].save(pdf_buffer, format="PDF", save_all=True, append_images=images_for_pdf[1:])
-                        
-                        st.session_state.file_data = pdf_buffer.getvalue()
+                        with io.BytesIO() as pdf_buffer:
+                            images_for_pdf[0].save(pdf_buffer, format="PDF", save_all=True, append_images=images_for_pdf[1:])
+                            st.session_state.file_data = pdf_buffer.getvalue()
+                            
                         st.session_state.file_name = "nexus_combined_document.pdf"
                         st.session_state.mime_type = "application/pdf"
                         st.session_state.button_label = f"💾 Download Combined PDF ({len(images_for_pdf)} pages)"
@@ -279,44 +298,51 @@ if uploaded_files:
                     
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                         for uploaded_file in uploaded_files:
-                            file_ext = uploaded_file.name.split('.')[-1].lower()
-                            st.write(f"Converting {uploaded_file.name} to {target_format}...")
-                            
-                            uploaded_file.seek(0)
-                            file_bytes = uploaded_file.read()
-                            
-                            if file_ext == 'svg':
-                                output_bytes = process_svg(file_bytes, target_format, vector_mode)
-                            elif file_ext == 'dxf':
-                                output_bytes = process_dxf(file_bytes, target_format)
-                            else:
-                                uploaded_file.seek(0)
-                                output_bytes = process_raster(uploaded_file, target_format, vector_mode)
+                            try:
+                                file_ext = uploaded_file.name.split('.')[-1].lower()
+                                st.write(f"Converting {uploaded_file.name} to {target_format}...")
                                 
-                            original_name = uploaded_file.name.rsplit('.', 1)[0]
-                            new_filename = f"{original_name}.{target_format.lower()}"
-                            
-                            zip_file.writestr(new_filename, output_bytes)
-                            success_count += 1
+                                uploaded_file.seek(0)
+                                file_bytes = uploaded_file.read()
+                                
+                                if file_ext == 'svg':
+                                    output_bytes = process_svg(file_bytes, target_format, vector_mode)
+                                elif file_ext == 'dxf':
+                                    output_bytes = process_dxf(file_bytes, target_format)
+                                else:
+                                    uploaded_file.seek(0)
+                                    output_bytes = process_raster(uploaded_file, target_format, vector_mode)
+                                    
+                                original_name = uploaded_file.name.rsplit('.', 1)[0]
+                                new_filename = f"{original_name}.{target_format.lower()}"
+                                
+                                zip_file.writestr(new_filename, output_bytes)
+                                success_count += 1
+                                
+                            except Exception as file_e:
+                                st.warning(f"Failed to process {uploaded_file.name}: {file_e}")
                     
-                    if len(uploaded_files) == 1:
-                        st.session_state.file_data = output_bytes
-                        st.session_state.file_name = new_filename
-                        st.session_state.mime_type = f"application/{target_format.lower()}"
-                        st.session_state.button_label = f"💾 Download {target_format} File"
+                    if success_count > 0:
+                        if len(uploaded_files) == 1:
+                            st.session_state.file_data = output_bytes
+                            st.session_state.file_name = new_filename
+                            st.session_state.mime_type = f"application/{target_format.lower()}"
+                            st.session_state.button_label = f"💾 Download {target_format} File"
+                        else:
+                            st.session_state.file_data = zip_buffer.getvalue()
+                            st.session_state.file_name = "nexus_batch_conversion.zip"
+                            st.session_state.mime_type = "application/zip"
+                            st.session_state.button_label = f"📦 Download ZIP ({success_count} files)"
+                        
+                        st.session_state.download_ready = True
+                        status.update(label=f"Successfully converted {success_count} files!", state="complete", expanded=False)
+                        st.balloons() 
                     else:
-                        st.session_state.file_data = zip_buffer.getvalue()
-                        st.session_state.file_name = "nexus_batch_conversion.zip"
-                        st.session_state.mime_type = "application/zip"
-                        st.session_state.button_label = f"📦 Download ZIP ({success_count} files)"
-                    
-                    st.session_state.download_ready = True
-                    status.update(label=f"Successfully converted {success_count} files!", state="complete", expanded=False)
-                    st.balloons() 
+                        status.update(label="No files were successfully converted.", state="error", expanded=True)
                     
             except Exception as e:
                 status.update(label="Conversion Failed", state="error", expanded=True)
-                st.error(f"Error details: {e}")
+                st.error(f"Critical error details: {e}")
 
     # --- THE DOWNLOAD BUTTON ---
     if st.session_state.download_ready:
