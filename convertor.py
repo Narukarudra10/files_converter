@@ -9,6 +9,7 @@ import io
 from PIL import Image, ImageOps 
 import cairosvg 
 import zipfile 
+from typing import List
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -107,18 +108,26 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
     img_area = image.shape[0] * image.shape[1]
     scale_factor = 1.0 
     
-    # Configure exact mathematical precision based on the selected mode
+    # --- CLOUD MEMORY FIX: Dynamic Scaling ---
+    # Prevents 1GB RAM crash by ensuring matrix never exceeds ~4 million pixels
+    MAX_SAFE_PIXELS = 4_000_000 
+    
     if "Trace Bitmap" in mode:
-        # INKSCAPE EMULATOR: Brightness Cutoff + TC89 Curve Fitting
         _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
-        # TC89_KCOS reduces unneeded nodes on straight lines, keeping curves smooth
         contour_mode = cv2.CHAIN_APPROX_TC89_KCOS
         epsilon_factor = 0.0005 
 
     elif "High Precision" in mode:
-        # Best for separate, tight dots (QR Codes)
-        scale_factor = 4.0
-        image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+        ideal_scale = 4.0
+        # Dynamically shrink the scale factor if the image is already massive
+        if img_area * (ideal_scale ** 2) > MAX_SAFE_PIXELS:
+            scale_factor = max(1.0, (MAX_SAFE_PIXELS / img_area) ** 0.5)
+        else:
+            scale_factor = ideal_scale
+
+        if scale_factor > 1.0:
+            image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+            
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
         _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
@@ -130,24 +139,21 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
         epsilon_factor = 0.001 
 
     else: 
-        # Outlines Only
         processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.002
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
 
-    # Decode UI toggles
     is_filled = "Trace Bitmap" in mode or "Solid" in mode
     is_outline_only = "Outlines Only" in mode
 
-    # 3. Vector Output Generation (Automatic "Object to Path")
+    # 3. Vector Output Generation
     if target_fmt == "DXF":
         doc = ezdxf.new('R2010')
         msp = doc.modelspace()
         if hierarchy is not None:
             for cnt in contours:
-                # Remove giant bounding box "canvas" line
                 if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
                     continue
                     
@@ -156,11 +162,10 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                 
                 points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
                 if len(points) >= 3:
-                    if "Solid" in mode:
+                    if is_filled:
                         hatch = msp.add_hatch(color=7)
                         hatch.paths.add_polyline_path(points, is_closed=True)
                     else:
-                        # Raw flattened line export (Laser Cutter / CAD standard)
                         msp.add_lwpolyline(points, close=True)
                     
         with io.StringIO() as buf:
@@ -181,10 +186,7 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                 
                 points = approx_points.reshape(-1, 2)
                 if len(points) >= 3:
-                    # Flattened Object-to-Path string generation
                     path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
-                    
-                    # Inkscape Fill vs Stroke logic
                     fill = "none" if is_outline_only else "black"
                     stroke = "black" if is_outline_only else "none"
                     svg_lines.append(f'<path d="{path_data}" fill="{fill}" stroke="{stroke}" stroke-width="1"/>')
@@ -202,7 +204,8 @@ def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
     elif target_fmt == "PNG": return cairosvg.svg2png(bytestring=file_bytes)
     elif target_fmt == "PDF": return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
-        png_bytes = cairosvg.svg2png(bytestring=file_bytes, scale=3.0) 
+        # --- CLOUD MEMORY FIX: Force max SVG render width ---
+        png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1500) 
         with io.BytesIO(png_bytes) as pseudo_file:
             return process_raster(pseudo_file, target_fmt, mode)
 
