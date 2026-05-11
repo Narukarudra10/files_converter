@@ -9,7 +9,6 @@ import io
 from PIL import Image, ImageOps 
 import cairosvg 
 import zipfile 
-from typing import List
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -108,72 +107,84 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
     img_area = image.shape[0] * image.shape[1]
     scale_factor = 1.0 
     
-    if "Round" in mode:
+    # Configure exact mathematical precision based on the selected mode
+    if "Trace Bitmap" in mode:
+        # INKSCAPE EMULATOR: Brightness Cutoff + TC89 Curve Fitting
+        _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
+        # TC89_KCOS reduces unneeded nodes on straight lines, keeping curves smooth
+        contour_mode = cv2.CHAIN_APPROX_TC89_KCOS
+        epsilon_factor = 0.0005 
+
+    elif "High Precision" in mode:
+        # Best for separate, tight dots (QR Codes)
         scale_factor = 4.0
         image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
         _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.0001 
+
     elif "Clean" in mode:
         _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.001 
-    elif "Photos" in mode:
-        smoothed_raster = cv2.medianBlur(image, 3) 
-        processed = cv2.adaptiveThreshold(smoothed_raster, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-        contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.005 
+
     else: 
+        # Outlines Only
         processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.002
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
-    is_filled = "Solid" in mode
+
+    # Decode UI toggles
+    is_filled = "Trace Bitmap" in mode or "Solid" in mode
     is_outline_only = "Outlines Only" in mode
 
-    # 3. Vector Output Generation
+    # 3. Vector Output Generation (Automatic "Object to Path")
     if target_fmt == "DXF":
         doc = ezdxf.new('R2010')
         msp = doc.modelspace()
         if hierarchy is not None:
             for cnt in contours:
-                if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95: continue
+                # Remove giant bounding box "canvas" line
+                if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
+                    continue
+                    
                 epsilon = epsilon_factor * cv2.arcLength(cnt, True)
                 approx_points = cv2.approxPolyDP(cnt, epsilon, True)
-                points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
                 
+                points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
                 if len(points) >= 3:
-                    if is_filled:
+                    if "Solid" in mode:
                         hatch = msp.add_hatch(color=7)
                         hatch.paths.add_polyline_path(points, is_closed=True)
                     else:
-                        if "Round" in mode:
-                            try:
-                                spline = msp.add_spline(fit_points=points)
-                                spline.closed = True
-                            except: msp.add_lwpolyline(points, close=True)
-                        else: msp.add_lwpolyline(points, close=True)
+                        # Raw flattened line export (Laser Cutter / CAD standard)
+                        msp.add_lwpolyline(points, close=True)
                     
         with io.StringIO() as buf:
             doc.write(buf)
             return buf.getvalue().encode('utf-8')
         
-    # --- NEW: Shared SVG generation for both SVG and EPS formats ---
     elif target_fmt in ["SVG", "EPS"]:
         svg_w, svg_h = int(image.shape[1] / scale_factor), int(image.shape[0] / scale_factor)
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}">']
         
         if hierarchy is not None:
             for cnt in contours:
-                if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95: continue
+                if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
+                    continue
+                    
                 epsilon = epsilon_factor * cv2.arcLength(cnt, True)
                 approx_points = cv2.approxPolyDP(cnt, epsilon, True)
-                points = approx_points.reshape(-1, 2)
                 
+                points = approx_points.reshape(-1, 2)
                 if len(points) >= 3:
+                    # Flattened Object-to-Path string generation
                     path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
+                    
+                    # Inkscape Fill vs Stroke logic
                     fill = "none" if is_outline_only else "black"
                     stroke = "black" if is_outline_only else "none"
                     svg_lines.append(f'<path d="{path_data}" fill="{fill}" stroke="{stroke}" stroke-width="1"/>')
@@ -181,15 +192,13 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
         svg_lines.append('</svg>')
         svg_output = "\n".join(svg_lines).encode('utf-8')
         
-        # If EPS, pass the SVG string directly into Cairo to generate the EPS file
         if target_fmt == "EPS":
             return cairosvg.svg2eps(bytestring=svg_output)
         return svg_output
 
 def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
-    """Handles SVG inputs natively, or routes to raster engine for tracing."""
     if target_fmt == "SVG": return file_bytes
-    elif target_fmt == "EPS": return cairosvg.svg2eps(bytestring=file_bytes) # SVG to EPS
+    elif target_fmt == "EPS": return cairosvg.svg2eps(bytestring=file_bytes)
     elif target_fmt == "PNG": return cairosvg.svg2png(bytestring=file_bytes)
     elif target_fmt == "PDF": return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
@@ -198,7 +207,6 @@ def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
             return process_raster(pseudo_file, target_fmt, mode)
 
 def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
-    """Renders CAD files into standard rasters using Matplotlib."""
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
     msp = doc.modelspace()
     
@@ -241,16 +249,19 @@ if uploaded_files:
     
     col1, col2 = st.columns(2)
     with col1:
-        # Added EPS to format list
         available_formats = ["DXF", "SVG", "EPS", "PNG", "JPG", "WEBP", "PDF"]
         target_format = st.selectbox("Convert All Files To:", available_formats, on_change=reset_download)
     
     with col2:
-        # Made EPS register as a Vector format
         is_vector = target_format in ["DXF", "SVG", "EPS"]
         vector_mode = st.selectbox(
             "Vector Tracing Style:", 
-            ["High Precision (Round Dots/Curves)", "Clean Digital Graphics (Sharp Corners)", "Photos / Shadows", "Outlines Only (Edge)"],
+            [
+                "Trace Bitmap (Inkscape Quality - Smooth Fill)", 
+                "High Precision (Best for QR & Scannable Dots)", 
+                "Clean Digital Graphics (Sharp Corners)", 
+                "Outlines Only (Edge Detection)"
+            ],
             disabled=not is_vector,
             help="Only applies when converting images to vectors.",
             on_change=reset_download
@@ -274,10 +285,10 @@ if uploaded_files:
         
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
+                # PDF Combiner Logic
                 if target_format == "PDF" and len(uploaded_files) > 1:
                     st.write("Combining images into a single multi-page PDF...")
                     images_for_pdf = []
-                    
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
                         if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
@@ -298,12 +309,12 @@ if uploaded_files:
                         st.session_state.mime_type = "application/pdf"
                         st.session_state.button_label = f"💾 Download Combined PDF ({len(images_for_pdf)} pages)"
                         st.session_state.download_ready = True
-                        
                         status.update(label="Successfully created combined PDF document!", state="complete", expanded=False)
                         st.balloons()
                     else:
                         status.update(label="No valid images found to combine.", state="error")
 
+                # Individual / Batch ZIP Logic
                 else:
                     zip_buffer = io.BytesIO()
                     success_count = 0
@@ -338,7 +349,6 @@ if uploaded_files:
                         if len(uploaded_files) == 1:
                             st.session_state.file_data = output_bytes
                             st.session_state.file_name = new_filename
-                            # Set proper MIME type for EPS download
                             mime = "application/postscript" if target_format == "EPS" else f"application/{target_format.lower()}"
                             st.session_state.mime_type = mime
                             st.session_state.button_label = f"💾 Download {target_format} File"
