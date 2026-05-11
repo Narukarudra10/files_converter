@@ -109,7 +109,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
     scale_factor = 1.0 
     
     # --- CLOUD MEMORY FIX: Dynamic Scaling ---
-    # Prevents 1GB RAM crash by ensuring matrix never exceeds ~4 million pixels
     MAX_SAFE_PIXELS = 4_000_000 
     
     if "Trace Bitmap" in mode:
@@ -119,7 +118,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
 
     elif "High Precision" in mode:
         ideal_scale = 4.0
-        # Dynamically shrink the scale factor if the image is already massive
         if img_area * (ideal_scale ** 2) > MAX_SAFE_PIXELS:
             scale_factor = max(1.0, (MAX_SAFE_PIXELS / img_area) ** 0.5)
         else:
@@ -145,8 +143,8 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
 
-    is_filled = "Trace Bitmap" in mode or "Solid" in mode
-    is_outline_only = "Outlines Only" in mode
+    # STRICT OUTLINE LOGIC: Only fill if the specific Solid checkbox was ticked
+    is_filled = "Solid" in mode
 
     # 3. Vector Output Generation
     if target_fmt == "DXF":
@@ -187,8 +185,11 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                 points = approx_points.reshape(-1, 2)
                 if len(points) >= 3:
                     path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
-                    fill = "none" if is_outline_only else "black"
-                    stroke = "black" if is_outline_only else "none"
+                    
+                    # If Solid is not checked, it draws an empty shape with a black outline!
+                    fill = "black" if is_filled else "none"
+                    stroke = "none" if is_filled else "black"
+                    
                     svg_lines.append(f'<path d="{path_data}" fill="{fill}" stroke="{stroke}" stroke-width="1"/>')
                     
         svg_lines.append('</svg>')
@@ -204,7 +205,6 @@ def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
     elif target_fmt == "PNG": return cairosvg.svg2png(bytestring=file_bytes)
     elif target_fmt == "PDF": return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
-        # --- CLOUD MEMORY FIX: Force max SVG render width ---
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1500) 
         with io.BytesIO(png_bytes) as pseudo_file:
             return process_raster(pseudo_file, target_fmt, mode)
@@ -260,7 +260,7 @@ if uploaded_files:
         vector_mode = st.selectbox(
             "Vector Tracing Style:", 
             [
-                "Trace Bitmap (Inkscape Quality - Smooth Fill)", 
+                "Trace Bitmap (Inkscape Quality Smooth Lines)", 
                 "High Precision (Best for QR & Scannable Dots)", 
                 "Clean Digital Graphics (Sharp Corners)", 
                 "Outlines Only (Edge Detection)"
@@ -270,9 +270,10 @@ if uploaded_files:
             on_change=reset_download
         )
         
-        dxf_fill = False
-        if target_format == "DXF":
-            dxf_fill = st.checkbox("Solid Fill (No Outlines)", value=False, help="Creates a solid hatch instead of drawing outlines for the laser to cut.", on_change=reset_download)
+        # Now the Solid Fill toggle appears for DXF, SVG, and EPS!
+        vector_fill = False
+        if is_vector:
+            vector_fill = st.checkbox("Solid Fill", value=False, help="Check to fill shapes solidly. Leave unchecked to generate empty cut outlines.", on_change=reset_download)
 
         if target_format == "PDF" and len(uploaded_files) > 1:
             st.info("💡 Images will be combined into a single, multi-page PDF document.")
@@ -284,7 +285,7 @@ if uploaded_files:
     
     if st.button("⚙️ Convert Files", use_container_width=True):
         st.session_state.download_ready = False 
-        full_engine_mode = f"{vector_mode} | {'Solid' if dxf_fill else 'Outlines'}"
+        full_engine_mode = f"{vector_mode} | {'Solid' if vector_fill else 'Outlines'}"
         
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
