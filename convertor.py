@@ -97,22 +97,27 @@ def process_raster(image_file, target_fmt, mode):
         img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
         return buf.getvalue()
         
-    # 2. Vector Tracing Engine with SMOOTHING
+    # 2. Vector Tracing Engine
     img_gray = img.convert("L")
     image = np.array(img_gray)
     
-    # NEW: Apply Median Blur to round off the sharp pixel corners before tracing
-    smoothed_raster = cv2.medianBlur(image, 5) 
-    
+    # Configure exact mathematical precision based on the selected mode
     if "Clean" in mode:
-        _, processed = cv2.threshold(smoothed_raster, 150, 255, cv2.THRESH_BINARY_INV)
-        contour_mode = cv2.CHAIN_APPROX_SIMPLE # Changed to SIMPLE to reduce redundant line points
+        # NO BLURRING. We need crisp, perfectly straight lines for QR codes and logos.
+        _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
+        contour_mode = cv2.CHAIN_APPROX_SIMPLE
+        epsilon_factor = 0.001 # Extremely tight approximation to preserve perfect corners
     elif "Photos" in mode:
+        # Slight blur helps smooth out bad lighting and noise in camera photos
+        smoothed_raster = cv2.medianBlur(image, 3) 
         processed = cv2.adaptiveThreshold(smoothed_raster, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
+        epsilon_factor = 0.005 # Looser approximation for organic/smooth smoothing
     else: 
-        processed = cv2.Canny(smoothed_raster, 100, 200)
+        # Outlines only
+        processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
+        epsilon_factor = 0.002
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
 
@@ -121,9 +126,8 @@ def process_raster(image_file, target_fmt, mode):
         msp = doc.modelspace()
         if hierarchy is not None:
             for cnt in contours:
-                # NEW: Polygon Approximation. This removes the jagged stair-step effect.
-                # 0.005 means 0.5% error tolerance. Adjust this number (e.g. 0.01) if you want it even smoother.
-                epsilon = 0.005 * cv2.arcLength(cnt, True)
+                # Apply the specific epsilon factor chosen by our mode rules above
+                epsilon = epsilon_factor * cv2.arcLength(cnt, True)
                 approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                 
                 points = [(pt[0][0], -pt[0][1]) for pt in approx_points]
@@ -138,8 +142,7 @@ def process_raster(image_file, target_fmt, mode):
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}">']
         if hierarchy is not None:
             for cnt in contours:
-                # Apply the same polygon smoothing to SVG web vectors
-                epsilon = 0.005 * cv2.arcLength(cnt, True)
+                epsilon = epsilon_factor * cv2.arcLength(cnt, True)
                 approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                 
                 points = approx_points.reshape(-1, 2)
@@ -235,6 +238,7 @@ if uploaded_files:
                     for uploaded_file in uploaded_files:
                         file_ext = uploaded_file.name.split('.')[-1].lower()
                         if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp']:
+                            # Apply EXIF rotation fix to PDF pages too!
                             img = Image.open(uploaded_file)
                             img = ImageOps.exif_transpose(img)
                             
