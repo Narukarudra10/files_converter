@@ -1,9 +1,3 @@
-"""
-NEXUS UNIVERSAL CONVERTER PRO
-A professional-grade file conversion suite featuring advanced raster-to-vector
-tracing engines, shape recognition, and batch processing capabilities.
-"""
-
 import streamlit as st
 import cv2
 import ezdxf
@@ -15,11 +9,8 @@ import io
 from PIL import Image, ImageOps 
 import cairosvg 
 import zipfile 
-from typing import Tuple, Optional, Dict, Any
 
-# ==========================================
-# 1. PAGE CONFIGURATION & SESSION STATE
-# ==========================================
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Universal File Converter Pro",
     page_icon="⚡",
@@ -27,6 +18,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# --- INITIALIZE MEMORY FOR DOWNLOAD BUG FIX ---
 if 'download_ready' not in st.session_state:
     st.session_state.download_ready = False
     st.session_state.file_data = None
@@ -34,9 +26,7 @@ if 'download_ready' not in st.session_state:
     st.session_state.mime_type = ""
     st.session_state.button_label = ""
 
-# ==========================================
-# 2. CUSTOM UI STYLING
-# ==========================================
+# --- 2. CUSTOM HTML/CSS ---
 st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
@@ -95,18 +85,12 @@ st.markdown("""
     <div class="custom-footer">&copy; 2026 Nexus Tools. Secure, local, and fast conversions.</div>
 """, unsafe_allow_html=True)
 
-# ==========================================
-# 3. CORE VECTOR TRACING ENGINE
-# ==========================================
-def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_slider: float, contrast_threshold: int, master_dxf: Optional[Dict[str, Any]] = None):
-    """
-    Main engine for converting raster pixels into mathematical vectors or standard images.
-    Features dynamic RAM limits to prevent cloud server crashes.
-    """
+# --- 3. CORE LOGIC ENGINE ---
+
+def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_slider: float, master_dxf=None):
     with Image.open(image_file) as img:
         img = ImageOps.exif_transpose(img) 
 
-        # --- Standard Image & PDF Output ---
         if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
             if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
@@ -114,26 +98,20 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                 img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
                 return buf.getvalue()
             
-        # --- Pre-processing for Vectorization ---
         img_gray = img.convert("L")
         image = np.array(img_gray)
     
     img_area = image.shape[0] * image.shape[1]
     scale_factor = 1.0 
-    
-    # Dynamic RAM limit: Prevents OpenCV from crashing Streamlit's 1GB memory cap
     MAX_SAFE_PIXELS = 4_000_000 
     
-    # --- Tracing Algorithm Selection ---
     if "Inkscape Trace" in mode:
-        # TC89 curve fitting with custom Laplacian smoothing downstream
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
-        _, processed = cv2.threshold(blurred, contrast_threshold, 255, cv2.THRESH_BINARY_INV)
+        _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         contour_mode = cv2.CHAIN_APPROX_NONE 
         epsilon_factor = epsilon_slider 
 
     elif "High Precision" in mode:
-        # 4x Upscaling for perfect geometric recognition (QR dots)
         ideal_scale = 4.0
         if img_area * (ideal_scale ** 2) > MAX_SAFE_PIXELS:
             scale_factor = max(1.0, (MAX_SAFE_PIXELS / img_area) ** 0.5)
@@ -144,23 +122,21 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
             image = cv2.resize(image, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
             
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
-        _, processed = cv2.threshold(blurred, contrast_threshold, 255, cv2.THRESH_BINARY_INV)
+        _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = 0.0001 
 
     elif "Technical" in mode:
-        # Douglas-Peucker bridging to snap pixelated straight lines
-        _, processed = cv2.threshold(image, contrast_threshold, 255, cv2.THRESH_BINARY_INV)
+        _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = epsilon_slider 
 
     elif "Clean" in mode:
-        _, processed = cv2.threshold(image, contrast_threshold, 255, cv2.THRESH_BINARY_INV)
+        _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = epsilon_slider 
 
     else: 
-        # Edge detection instead of solid thresholding
         processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
         epsilon_factor = epsilon_slider
@@ -168,17 +144,15 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
     is_filled = "Solid" in mode
 
-    # --- DXF Grid Integration Setup ---
-    offset_x, offset_y = 0.0, 0.0
+    # --- MASTER GRID LOGIC EXTRACTION ---
+    offset_x = 0.0
+    offset_y = 0.0
     msp = None
     if master_dxf:
         msp = master_dxf['msp']
         offset_x = master_dxf['offset_x']
         offset_y = master_dxf['offset_y']
 
-    # ==========================================
-    # DXF WRITER
-    # ==========================================
     if target_fmt == "DXF":
         if not msp:
             doc = ezdxf.new('R2010')
@@ -186,7 +160,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
             
         if hierarchy is not None:
             for cnt in contours:
-                # Remove giant bounding box drawn around the entire canvas
                 if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
                     continue
                 
@@ -194,7 +167,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                 area = cv2.contourArea(cnt)
                 is_perfect_circle = False
                 
-                # 1. Mathematical Shape Recognition (Circles)
                 if "High Precision" in mode and perimeter > 0:
                     circularity = 4 * np.pi * (area / (perimeter * perimeter))
                     if circularity > 0.82: 
@@ -202,6 +174,7 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                         is_perfect_circle = True
                 
                 if is_perfect_circle:
+                    # Apply Master Grid Offsets
                     real_cx = (cx / scale_factor) + offset_x
                     real_cy = -(cy / scale_factor) - offset_y
                     real_r = r / scale_factor
@@ -214,22 +187,21 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     else:
                         msp.add_circle(center=(real_cx, real_cy), radius=real_r)
                 
-                # 2. Laplacian Spline Smoothing (Inkscape Emulator)
                 elif "Inkscape Trace" in mode and not is_filled:
                     raw_points = np.array([pt[0] for pt in cnt], dtype=float)
                     n = len(raw_points)
                     
                     if n >= 6:
-                        # 5 passes of mathematical rolling-average smoothing
                         smoothed = raw_points
                         for _ in range(5): 
                             prev_pts = np.roll(smoothed, 1, axis=0)
                             next_pts = np.roll(smoothed, -1, axis=0)
                             smoothed = (prev_pts + smoothed * 2 + next_pts) / 4.0
-                        final_points = smoothed[::3] # Decimate to keep file lightweight
+                        final_points = smoothed[::3]
                     else:
                         final_points = raw_points
 
+                    # Apply Master Grid Offsets
                     points = [((pt[0] / scale_factor) + offset_x, -(pt[1] / scale_factor) - offset_y) for pt in final_points]
                     
                     if len(points) >= 3:
@@ -239,10 +211,10 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                         except:
                             msp.add_lwpolyline(points, close=True)
                 
-                # 3. Standard / Technical Polygon Tracing
                 else:
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
+                    # Apply Master Grid Offsets
                     points = [((pt[0][0] / scale_factor) + offset_x, -(pt[0][1] / scale_factor) - offset_y) for pt in approx_points]
                     
                     if len(points) >= 3:
@@ -252,7 +224,7 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                         else:
                             msp.add_lwpolyline(points, close=True)
         
-        # Grid Return vs Standalone Return
+        # If part of a combined grid, return dimensions so the main loop can place the next item
         if master_dxf:
             width = image.shape[1] / scale_factor
             height = image.shape[0] / scale_factor
@@ -262,9 +234,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                 doc.write(buf)
                 return buf.getvalue().encode('utf-8')
         
-    # ==========================================
-    # SVG & EPS WRITER
-    # ==========================================
     elif target_fmt in ["SVG", "EPS"]:
         svg_w, svg_h = int(image.shape[1] / scale_factor), int(image.shape[0] / scale_factor)
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}">']
@@ -321,33 +290,27 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
         svg_lines.append('</svg>')
         svg_output = "\n".join(svg_lines).encode('utf-8')
         
-        # Compile EPS via Cairo backend
         if target_fmt == "EPS":
             return cairosvg.svg2eps(bytestring=svg_output)
         return svg_output
 
-# ==========================================
-# FILE PIPELINE ROUTERS
-# ==========================================
-def process_svg(file_bytes: bytes, target_fmt: str, mode: str, epsilon_slider: float, contrast_threshold: int, master_dxf=None):
-    """Handles native SVG inputs or routes them through the raster engine for DXF tracing."""
+def process_svg(file_bytes: bytes, target_fmt: str, mode: str, epsilon_slider: float, master_dxf=None):
     if target_fmt == "DXF" and master_dxf:
+        # If combining to DXF grid, pipe SVG through raster engine to get coordinates
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1500) 
         with io.BytesIO(png_bytes) as pseudo_file:
-            return process_raster(pseudo_file, target_fmt, mode, epsilon_slider, contrast_threshold, master_dxf)
+            return process_raster(pseudo_file, target_fmt, mode, epsilon_slider, master_dxf)
             
     if target_fmt == "SVG": return file_bytes
     elif target_fmt == "EPS": return cairosvg.svg2eps(bytestring=file_bytes)
     elif target_fmt == "PNG": return cairosvg.svg2png(bytestring=file_bytes)
     elif target_fmt == "PDF": return cairosvg.svg2pdf(bytestring=file_bytes)
     else:
-        # Re-rasterize high-res for standard image conversion
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1500) 
         with io.BytesIO(png_bytes) as pseudo_file:
-            return process_raster(pseudo_file, target_fmt, mode, epsilon_slider, contrast_threshold)
+            return process_raster(pseudo_file, target_fmt, mode, epsilon_slider)
 
 def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
-    """Renders CAD files into standard images using Matplotlib backend."""
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
     msp = doc.modelspace()
     fig = plt.figure()
@@ -360,9 +323,8 @@ def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
         plt.close(fig)
         return buf.getvalue()
 
-# ==========================================
-# 4. USER INTERFACE
-# ==========================================
+# --- 4. USER INTERFACE ---
+
 st.markdown('<p class="main-title">Nexus Converter</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">A professional suite to convert pixels, vectors, and documents instantly.</p>', unsafe_allow_html=True)
 
@@ -407,38 +369,26 @@ if uploaded_files:
             on_change=reset_download
         )
         
-        # Defaults
         epsilon_slider = 0.001
-        contrast_threshold = 128
+        if is_vector and vector_mode in ["Technical / Pixelated (Force Straight Lines)", "Clean Digital Graphics (Sharp Corners)", "Outlines Only (Edge Detection)"]:
+            slider_value = st.slider(
+                "Line Smoothing (Tolerance %)", 
+                min_value=0.0, 
+                max_value=10.0, 
+                value=1.5, 
+                step=0.1, 
+                help="Higher values snap edges together. Lower values hug exact pixels.",
+                on_change=reset_download
+            )
+            epsilon_slider = slider_value / 100.0
+
+        vector_fill = False
+        combine_dxf = False
         
-        # Contextual UI Tools based on selected mode
         if is_vector:
-            if vector_mode in ["Technical / Pixelated (Force Straight Lines)", "Clean Digital Graphics (Sharp Corners)", "Outlines Only (Edge Detection)"]:
-                slider_value = st.slider(
-                    "Line Smoothing (Tolerance %)", 
-                    min_value=0.0, 
-                    max_value=10.0, 
-                    value=1.5, 
-                    step=0.1, 
-                    help="Higher values snap edges together. Lower values hug exact pixels.",
-                    on_change=reset_download
-                )
-                epsilon_slider = slider_value / 100.0
-
-            if vector_mode != "Outlines Only (Edge Detection)":
-                contrast_threshold = st.slider(
-                    "Contrast Cutoff (Fix Blank Files!)", 
-                    min_value=1, 
-                    max_value=254, 
-                    value=128, 
-                    step=1, 
-                    help="Increase this number if your file comes out completely blank. Decrease if it comes out completely black.",
-                    on_change=reset_download
-                )
-
             vector_fill = st.checkbox("Solid Fill", value=False, help="Check to fill shapes solidly. Leave unchecked to generate empty cut outlines.", on_change=reset_download)
 
-        combine_dxf = False
+        # --- NEW COMBINE TOGGLE ---
         if target_format == "DXF" and len(uploaded_files) > 1:
             combine_dxf = st.checkbox("Combine all into a single DXF grid", value=False, help="Places all converted images side-by-side into one master file.", on_change=reset_download)
 
@@ -452,13 +402,11 @@ if uploaded_files:
     
     if st.button("⚙️ Convert Files", use_container_width=True):
         st.session_state.download_ready = False 
-        full_engine_mode = f"{vector_mode} | {'Solid' if is_vector and vector_fill else 'Outlines'}"
+        full_engine_mode = f"{vector_mode} | {'Solid' if vector_fill else 'Outlines'}"
         
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
-                # ==========================================
-                # PDF MULTI-PAGE COMBINER
-                # ==========================================
+                # PDF Combiner Logic
                 if target_format == "PDF" and len(uploaded_files) > 1:
                     images_for_pdf = []
                     for uploaded_file in uploaded_files:
@@ -486,9 +434,7 @@ if uploaded_files:
                     else:
                         status.update(label="No valid images found to combine.", state="error")
                 
-                # ==========================================
-                # MASTER DXF GRID COMPILER
-                # ==========================================
+                # --- NEW MASTER DXF GRID COMPILER ---
                 elif target_format == "DXF" and combine_dxf and len(uploaded_files) > 1:
                     st.write("Combining files into a single master DXF grid...")
                     master_doc = ezdxf.new('R2010')
@@ -514,21 +460,22 @@ if uploaded_files:
                             }
                             
                             if file_ext == 'svg':
-                                w, h = process_svg(file_bytes, target_format, full_engine_mode, epsilon_slider, contrast_threshold, master_context)
+                                w, h = process_svg(file_bytes, target_format, full_engine_mode, epsilon_slider, master_context)
                             else:
                                 uploaded_file.seek(0)
-                                w, h = process_raster(uploaded_file, target_format, full_engine_mode, epsilon_slider, contrast_threshold, master_context)
+                                w, h = process_raster(uploaded_file, target_format, full_engine_mode, epsilon_slider, master_context)
                             
                             success_count += 1
                             row_max_h = max(row_max_h, h)
                             
-                            # Responsive Layout Engine
+                            # Add 50 units of padding space between items
                             PADDING = max(w, h) * 0.15 
                             if PADDING < 20: PADDING = 20
                             
                             current_x += w + PADDING
                             items_in_current_row += 1
                             
+                            # Drop down to the next row if grid is full
                             if items_in_current_row >= items_per_row:
                                 current_x = 0.0
                                 current_y += row_max_h + PADDING
@@ -551,9 +498,7 @@ if uploaded_files:
                     else:
                         status.update(label="No valid files were processed for the grid.", state="error", expanded=True)
 
-                # ==========================================
-                # INDIVIDUAL FILES & BATCH ZIP DOWNLOADER
-                # ==========================================
+                # Individual / Batch ZIP Logic
                 else:
                     zip_buffer = io.BytesIO()
                     success_count = 0
@@ -565,12 +510,12 @@ if uploaded_files:
                                 file_bytes = uploaded_file.read()
                                 
                                 if file_ext == 'svg':
-                                    output_bytes = process_svg(file_bytes, target_format, full_engine_mode, epsilon_slider, contrast_threshold)
+                                    output_bytes = process_svg(file_bytes, target_format, full_engine_mode, epsilon_slider)
                                 elif file_ext == 'dxf':
                                     output_bytes = process_dxf(file_bytes, target_format)
                                 else:
                                     uploaded_file.seek(0)
-                                    output_bytes = process_raster(uploaded_file, target_format, full_engine_mode, epsilon_slider, contrast_threshold)
+                                    output_bytes = process_raster(uploaded_file, target_format, full_engine_mode, epsilon_slider)
                                     
                                 original_name = uploaded_file.name.rsplit('.', 1)[0]
                                 new_filename = f"{original_name}.{target_format.lower()}"
@@ -601,7 +546,7 @@ if uploaded_files:
                 status.update(label="Conversion Failed", state="error", expanded=True)
                 st.error(f"Critical error details: {e}")
 
-    # --- FINAL DOWNLOAD TRIGGER ---
+    # --- THE DOWNLOAD BUTTON ---
     if st.session_state.download_ready:
         st.download_button(
             label=st.session_state.button_label,
