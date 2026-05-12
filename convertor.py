@@ -89,7 +89,6 @@ st.markdown("""
 # --- 3. CORE LOGIC ENGINE ---
 
 def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
-    """Processes raster images, handles EXIF rotation, formats, and vector tracing."""
     with Image.open(image_file) as img:
         img = ImageOps.exif_transpose(img) 
 
@@ -125,7 +124,14 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
         _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.0001 
+        epsilon_factor = 0.0001 # Extremely tight for perfect circles
+
+    elif "Technical" in mode:
+        # --- NEW: STRAIGHT LINE SNAPPER FOR PIXELATED CROSSES/SQUARES ---
+        _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
+        contour_mode = cv2.CHAIN_APPROX_SIMPLE
+        # A much larger epsilon (1.5%) snaps the line tight across pixel steps
+        epsilon_factor = 0.015 
 
     elif "Clean" in mode:
         _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
@@ -148,15 +154,14 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                 if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
                     continue
                 
-                # --- NEW: TRUE SHAPE RECOGNITION ---
                 perimeter = cv2.arcLength(cnt, True)
                 area = cv2.contourArea(cnt)
                 is_perfect_circle = False
                 
-                # If we are in high precision mode, check if the shape is trying to be a circle
+                # Shape Recognition for Circles
                 if "High Precision" in mode and perimeter > 0:
                     circularity = 4 * np.pi * (area / (perimeter * perimeter))
-                    if circularity > 0.82:  # If it is 82% circular, assume it's a dot and make it perfect!
+                    if circularity > 0.82: 
                         (cx, cy), r = cv2.minEnclosingCircle(cnt)
                         is_perfect_circle = True
                 
@@ -166,16 +171,14 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                     real_r = r / scale_factor
                     
                     if is_filled:
-                        # Draw a perfectly smooth mathematical boundary for the solid hatch
                         angles = np.linspace(0, 2*np.pi, 72, endpoint=False)
                         circle_points = [(real_cx + real_r*np.cos(a), real_cy + real_r*np.sin(a)) for a in angles]
                         hatch = msp.add_hatch(color=7)
                         hatch.paths.add_polyline_path(circle_points, is_closed=True)
                     else:
-                        # Draw a true CAD mathematical CIRCLE entity!
                         msp.add_circle(center=(real_cx, real_cy), radius=real_r)
                 else:
-                    # Not a circle? Fall back to standard tracing lines (for squares, logos, etc.)
+                    # Snaps lines straight based on the epsilon_factor
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                     points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
@@ -217,7 +220,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                     real_cx = cx / scale_factor
                     real_cy = cy / scale_factor
                     real_r = r / scale_factor
-                    # Write a true SVG <circle> tag instead of a bumpy path
                     svg_lines.append(f'<circle cx="{real_cx:.4f}" cy="{real_cy:.4f}" r="{real_r:.4f}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
                 else:
                     epsilon = epsilon_factor * perimeter
@@ -295,6 +297,7 @@ if uploaded_files:
             "Vector Tracing Style:", 
             [
                 "High Precision (Shape Recognition for QR/Dots)", 
+                "Technical / Pixelated (Force Straight Lines)", # <-- YOUR NEW MODE
                 "Trace Bitmap (Inkscape Quality Smooth Lines)", 
                 "Clean Digital Graphics (Sharp Corners)", 
                 "Outlines Only (Edge Detection)"
