@@ -88,7 +88,7 @@ st.markdown("""
 
 # --- 3. CORE LOGIC ENGINE ---
 
-def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
+def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_slider: float) -> bytes:
     with Image.open(image_file) as img:
         img = ImageOps.exif_transpose(img) 
 
@@ -124,24 +124,23 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
         _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.0001 # Extremely tight for perfect circles
+        epsilon_factor = 0.0001 
 
     elif "Technical" in mode:
-        # --- NEW: STRAIGHT LINE SNAPPER FOR PIXELATED CROSSES/SQUARES ---
         _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        # A much larger epsilon (1.5%) snaps the line tight across pixel steps
-        epsilon_factor = 0.015 
+        # --- NEW: User controlled slider replaces the magic number ---
+        epsilon_factor = epsilon_slider 
 
     elif "Clean" in mode:
         _, processed = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.001 
+        epsilon_factor = epsilon_slider 
 
     else: 
         processed = cv2.Canny(image, 100, 200)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        epsilon_factor = 0.002
+        epsilon_factor = epsilon_slider
         
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
     is_filled = "Solid" in mode
@@ -158,7 +157,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                 area = cv2.contourArea(cnt)
                 is_perfect_circle = False
                 
-                # Shape Recognition for Circles
                 if "High Precision" in mode and perimeter > 0:
                     circularity = 4 * np.pi * (area / (perimeter * perimeter))
                     if circularity > 0.82: 
@@ -178,7 +176,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
                     else:
                         msp.add_circle(center=(real_cx, real_cy), radius=real_r)
                 else:
-                    # Snaps lines straight based on the epsilon_factor
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                     points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
@@ -237,7 +234,7 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str) -> bytes:
             return cairosvg.svg2eps(bytestring=svg_output)
         return svg_output
 
-def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
+def process_svg(file_bytes: bytes, target_fmt: str, mode: str, epsilon_slider: float) -> bytes:
     if target_fmt == "SVG": return file_bytes
     elif target_fmt == "EPS": return cairosvg.svg2eps(bytestring=file_bytes)
     elif target_fmt == "PNG": return cairosvg.svg2png(bytestring=file_bytes)
@@ -245,7 +242,7 @@ def process_svg(file_bytes: bytes, target_fmt: str, mode: str) -> bytes:
     else:
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1500) 
         with io.BytesIO(png_bytes) as pseudo_file:
-            return process_raster(pseudo_file, target_fmt, mode)
+            return process_raster(pseudo_file, target_fmt, mode, epsilon_slider)
 
 def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
@@ -259,7 +256,6 @@ def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
         fig.savefig(buf, format=target_fmt.lower(), dpi=300)
         plt.close(fig)
         return buf.getvalue()
-
 
 # --- 4. USER INTERFACE ---
 
@@ -296,8 +292,8 @@ if uploaded_files:
         vector_mode = st.selectbox(
             "Vector Tracing Style:", 
             [
+                "Technical / Pixelated (Force Straight Lines)", 
                 "High Precision (Shape Recognition for QR/Dots)", 
-                "Technical / Pixelated (Force Straight Lines)", # <-- YOUR NEW MODE
                 "Trace Bitmap (Inkscape Quality Smooth Lines)", 
                 "Clean Digital Graphics (Sharp Corners)", 
                 "Outlines Only (Edge Detection)"
@@ -307,6 +303,20 @@ if uploaded_files:
             on_change=reset_download
         )
         
+        # --- NEW: User Control Smoothing Slider ---
+        epsilon_slider = 0.001
+        if is_vector and vector_mode in ["Technical / Pixelated (Force Straight Lines)", "Clean Digital Graphics (Sharp Corners)", "Outlines Only (Edge Detection)"]:
+            slider_value = st.slider(
+                "Line Smoothing (Tolerance %)", 
+                min_value=0.0, 
+                max_value=10.0, 
+                value=1.5, 
+                step=0.1, 
+                help="Higher values snap jagged edges into perfectly straight lines. Lower values hug exact pixels.",
+                on_change=reset_download
+            )
+            epsilon_slider = slider_value / 100.0
+
         vector_fill = False
         if is_vector:
             vector_fill = st.checkbox("Solid Fill", value=False, help="Check to fill shapes solidly. Leave unchecked to generate empty cut outlines.", on_change=reset_download)
@@ -362,12 +372,12 @@ if uploaded_files:
                                 file_bytes = uploaded_file.read()
                                 
                                 if file_ext == 'svg':
-                                    output_bytes = process_svg(file_bytes, target_format, full_engine_mode)
+                                    output_bytes = process_svg(file_bytes, target_format, full_engine_mode, epsilon_slider)
                                 elif file_ext == 'dxf':
                                     output_bytes = process_dxf(file_bytes, target_format)
                                 else:
                                     uploaded_file.seek(0)
-                                    output_bytes = process_raster(uploaded_file, target_format, full_engine_mode)
+                                    output_bytes = process_raster(uploaded_file, target_format, full_engine_mode, epsilon_slider)
                                     
                                 original_name = uploaded_file.name.rsplit('.', 1)[0]
                                 new_filename = f"{original_name}.{target_format.lower()}"
