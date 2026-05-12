@@ -9,7 +9,6 @@ import io
 from PIL import Image, ImageOps 
 import cairosvg 
 import zipfile 
-from typing import List
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -88,7 +87,7 @@ st.markdown("""
 
 # --- 3. CORE LOGIC ENGINE ---
 
-def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_slider: float) -> bytes:
+def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_slider: float, master_dxf=None):
     with Image.open(image_file) as img:
         img = ImageOps.exif_transpose(img) 
 
@@ -106,11 +105,9 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
     scale_factor = 1.0 
     MAX_SAFE_PIXELS = 4_000_000 
     
-    # --- NEW: INKSCAPE PERFECT TRACE EMULATOR ---
     if "Inkscape Trace" in mode:
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
         _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        # We must use CHAIN_APPROX_NONE to get every single pixel for our smoothing math
         contour_mode = cv2.CHAIN_APPROX_NONE 
         epsilon_factor = epsilon_slider 
 
@@ -147,9 +144,20 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
     is_filled = "Solid" in mode
 
+    # --- MASTER GRID LOGIC EXTRACTION ---
+    offset_x = 0.0
+    offset_y = 0.0
+    msp = None
+    if master_dxf:
+        msp = master_dxf['msp']
+        offset_x = master_dxf['offset_x']
+        offset_y = master_dxf['offset_y']
+
     if target_fmt == "DXF":
-        doc = ezdxf.new('R2010')
-        msp = doc.modelspace()
+        if not msp:
+            doc = ezdxf.new('R2010')
+            msp = doc.modelspace()
+            
         if hierarchy is not None:
             for cnt in contours:
                 if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
@@ -166,8 +174,9 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                         is_perfect_circle = True
                 
                 if is_perfect_circle:
-                    real_cx = cx / scale_factor
-                    real_cy = -cy / scale_factor
+                    # Apply Master Grid Offsets
+                    real_cx = (cx / scale_factor) + offset_x
+                    real_cy = -(cy / scale_factor) - offset_y
                     real_r = r / scale_factor
                     
                     if is_filled:
@@ -178,30 +187,25 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     else:
                         msp.add_circle(center=(real_cx, real_cy), radius=real_r)
                 
-                # --- TRUE INKSCAPE TRACE SPLINE ALGORITHM ---
                 elif "Inkscape Trace" in mode and not is_filled:
-                    # 1. Extract raw points
                     raw_points = np.array([pt[0] for pt in cnt], dtype=float)
                     n = len(raw_points)
                     
                     if n >= 6:
-                        # 2. Laplacian Mathematical Smoothing (Melts the pixel stairs)
                         smoothed = raw_points
-                        for _ in range(5): # 5 passes of curve smoothing
+                        for _ in range(5): 
                             prev_pts = np.roll(smoothed, 1, axis=0)
                             next_pts = np.roll(smoothed, -1, axis=0)
                             smoothed = (prev_pts + smoothed * 2 + next_pts) / 4.0
-                        
-                        # 3. Decimate smoothly to keep the CAD file fast and responsive
                         final_points = smoothed[::3]
                     else:
                         final_points = raw_points
 
-                    points = [((pt[0] / scale_factor), -(pt[1] / scale_factor)) for pt in final_points]
+                    # Apply Master Grid Offsets
+                    points = [((pt[0] / scale_factor) + offset_x, -(pt[1] / scale_factor) - offset_y) for pt in final_points]
                     
                     if len(points) >= 3:
                         try:
-                            # Generate a perfectly continuous B-Spline curve
                             spline = msp.add_spline(fit_points=points)
                             spline.closed = True
                         except:
@@ -210,7 +214,8 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                 else:
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
-                    points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
+                    # Apply Master Grid Offsets
+                    points = [((pt[0][0] / scale_factor) + offset_x, -(pt[0][1] / scale_factor) - offset_y) for pt in approx_points]
                     
                     if len(points) >= 3:
                         if is_filled:
@@ -218,10 +223,16 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                             hatch.paths.add_polyline_path(points, is_closed=True)
                         else:
                             msp.add_lwpolyline(points, close=True)
-                    
-        with io.StringIO() as buf:
-            doc.write(buf)
-            return buf.getvalue().encode('utf-8')
+        
+        # If part of a combined grid, return dimensions so the main loop can place the next item
+        if master_dxf:
+            width = image.shape[1] / scale_factor
+            height = image.shape[0] / scale_factor
+            return width, height
+        else:
+            with io.StringIO() as buf:
+                doc.write(buf)
+                return buf.getvalue().encode('utf-8')
         
     elif target_fmt in ["SVG", "EPS"]:
         svg_w, svg_h = int(image.shape[1] / scale_factor), int(image.shape[0] / scale_factor)
@@ -283,7 +294,13 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
             return cairosvg.svg2eps(bytestring=svg_output)
         return svg_output
 
-def process_svg(file_bytes: bytes, target_fmt: str, mode: str, epsilon_slider: float) -> bytes:
+def process_svg(file_bytes: bytes, target_fmt: str, mode: str, epsilon_slider: float, master_dxf=None):
+    if target_fmt == "DXF" and master_dxf:
+        # If combining to DXF grid, pipe SVG through raster engine to get coordinates
+        png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1500) 
+        with io.BytesIO(png_bytes) as pseudo_file:
+            return process_raster(pseudo_file, target_fmt, mode, epsilon_slider, master_dxf)
+            
     if target_fmt == "SVG": return file_bytes
     elif target_fmt == "EPS": return cairosvg.svg2eps(bytestring=file_bytes)
     elif target_fmt == "PNG": return cairosvg.svg2png(bytestring=file_bytes)
@@ -366,8 +383,14 @@ if uploaded_files:
             epsilon_slider = slider_value / 100.0
 
         vector_fill = False
+        combine_dxf = False
+        
         if is_vector:
             vector_fill = st.checkbox("Solid Fill", value=False, help="Check to fill shapes solidly. Leave unchecked to generate empty cut outlines.", on_change=reset_download)
+
+        # --- NEW COMBINE TOGGLE ---
+        if target_format == "DXF" and len(uploaded_files) > 1:
+            combine_dxf = st.checkbox("Combine all into a single DXF grid", value=False, help="Places all converted images side-by-side into one master file.", on_change=reset_download)
 
         if target_format == "PDF" and len(uploaded_files) > 1:
             st.info("💡 Images will be combined into a single, multi-page PDF document.")
@@ -383,6 +406,7 @@ if uploaded_files:
         
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
+                # PDF Combiner Logic
                 if target_format == "PDF" and len(uploaded_files) > 1:
                     images_for_pdf = []
                     for uploaded_file in uploaded_files:
@@ -409,6 +433,72 @@ if uploaded_files:
                         st.balloons()
                     else:
                         status.update(label="No valid images found to combine.", state="error")
+                
+                # --- NEW MASTER DXF GRID COMPILER ---
+                elif target_format == "DXF" and combine_dxf and len(uploaded_files) > 1:
+                    st.write("Combining files into a single master DXF grid...")
+                    master_doc = ezdxf.new('R2010')
+                    master_msp = master_doc.modelspace()
+                    
+                    current_x = 0.0
+                    current_y = 0.0
+                    row_max_h = 0.0
+                    items_per_row = max(1, int(len(uploaded_files)**0.5))
+                    items_in_current_row = 0
+                    success_count = 0
+                    
+                    for uploaded_file in uploaded_files:
+                        file_ext = uploaded_file.name.split('.')[-1].lower()
+                        if file_ext in ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'svg']:
+                            uploaded_file.seek(0)
+                            file_bytes = uploaded_file.read()
+                            
+                            master_context = {
+                                'msp': master_msp,
+                                'offset_x': current_x,
+                                'offset_y': current_y
+                            }
+                            
+                            if file_ext == 'svg':
+                                w, h = process_svg(file_bytes, target_format, full_engine_mode, epsilon_slider, master_context)
+                            else:
+                                uploaded_file.seek(0)
+                                w, h = process_raster(uploaded_file, target_format, full_engine_mode, epsilon_slider, master_context)
+                            
+                            success_count += 1
+                            row_max_h = max(row_max_h, h)
+                            
+                            # Add 50 units of padding space between items
+                            PADDING = max(w, h) * 0.15 
+                            if PADDING < 20: PADDING = 20
+                            
+                            current_x += w + PADDING
+                            items_in_current_row += 1
+                            
+                            # Drop down to the next row if grid is full
+                            if items_in_current_row >= items_per_row:
+                                current_x = 0.0
+                                current_y += row_max_h + PADDING
+                                row_max_h = 0.0
+                                items_in_current_row = 0
+                        else:
+                            st.warning(f"Skipping {uploaded_file.name}: Cannot combine native DXF files into grid yet.")
+                    
+                    if success_count > 0:
+                        with io.StringIO() as buf:
+                            master_doc.write(buf)
+                            st.session_state.file_data = buf.getvalue().encode('utf-8')
+                        
+                        st.session_state.file_name = "nexus_combined_grid.dxf"
+                        st.session_state.mime_type = "application/dxf"
+                        st.session_state.button_label = f"💾 Download Master Grid DXF ({success_count} files)"
+                        st.session_state.download_ready = True
+                        status.update(label="Successfully created combined DXF grid!", state="complete", expanded=False)
+                        st.balloons()
+                    else:
+                        status.update(label="No valid files were processed for the grid.", state="error", expanded=True)
+
+                # Individual / Batch ZIP Logic
                 else:
                     zip_buffer = io.BytesIO()
                     success_count = 0
