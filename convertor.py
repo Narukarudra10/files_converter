@@ -106,7 +106,14 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
     scale_factor = 1.0 
     MAX_SAFE_PIXELS = 4_000_000 
     
-    if "Trace Bitmap" in mode:
+    # --- NEW MODE: Force Spline Curve logic ---
+    if "Smooth Curves" in mode:
+        blurred = cv2.GaussianBlur(image, (3, 3), 0)
+        _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contour_mode = cv2.CHAIN_APPROX_TC89_KCOS # Keeps point density high on curves
+        epsilon_factor = epsilon_slider / 2.0 # Tighter constraint to prevent spline wobble
+        
+    elif "Trace Bitmap" in mode:
         _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_TC89_KCOS
         epsilon_factor = 0.0005 
@@ -129,7 +136,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
     elif "Technical" in mode:
         _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
         contour_mode = cv2.CHAIN_APPROX_SIMPLE
-        # --- NEW: User controlled slider replaces the magic number ---
         epsilon_factor = epsilon_slider 
 
     elif "Clean" in mode:
@@ -175,6 +181,22 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                         hatch.paths.add_polyline_path(circle_points, is_closed=True)
                     else:
                         msp.add_circle(center=(real_cx, real_cy), radius=real_r)
+                
+                # --- NEW: TRUE SPLINE CAD OUTPUT ---
+                elif "Smooth Curves" in mode and not is_filled:
+                    epsilon = epsilon_factor * perimeter
+                    approx_points = cv2.approxPolyDP(cnt, epsilon, True)
+                    points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
+                    
+                    if len(points) >= 3:
+                        try:
+                            # Generate a perfectly continuous B-Spline curve
+                            spline = msp.add_spline(fit_points=points)
+                            spline.closed = True
+                        except:
+                            # Fallback just in case point geometry fails the spline math
+                            msp.add_lwpolyline(points, close=True)
+                
                 else:
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
@@ -292,6 +314,7 @@ if uploaded_files:
         vector_mode = st.selectbox(
             "Vector Tracing Style:", 
             [
+                "Smooth Curves (True CAD Splines)", 
                 "Technical / Pixelated (Force Straight Lines)", 
                 "High Precision (Shape Recognition for QR/Dots)", 
                 "Trace Bitmap (Inkscape Quality Smooth Lines)", 
@@ -303,16 +326,15 @@ if uploaded_files:
             on_change=reset_download
         )
         
-        # --- NEW: User Control Smoothing Slider ---
         epsilon_slider = 0.001
-        if is_vector and vector_mode in ["Technical / Pixelated (Force Straight Lines)", "Clean Digital Graphics (Sharp Corners)", "Outlines Only (Edge Detection)"]:
+        if is_vector and vector_mode in ["Smooth Curves (True CAD Splines)", "Technical / Pixelated (Force Straight Lines)", "Clean Digital Graphics (Sharp Corners)", "Outlines Only (Edge Detection)"]:
             slider_value = st.slider(
                 "Line Smoothing (Tolerance %)", 
                 min_value=0.0, 
                 max_value=10.0, 
                 value=1.5, 
                 step=0.1, 
-                help="Higher values snap jagged edges into perfectly straight lines. Lower values hug exact pixels.",
+                help="Higher values snap edges together. Lower values hug exact pixels.",
                 on_change=reset_download
             )
             epsilon_slider = slider_value / 100.0
