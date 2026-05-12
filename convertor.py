@@ -201,11 +201,11 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     
                     if n >= 6:
                         smoothed = raw_points
-                        for _ in range(5): 
+                        for _ in range(3): 
                             prev_pts = np.roll(smoothed, 1, axis=0)
                             next_pts = np.roll(smoothed, -1, axis=0)
                             smoothed = (prev_pts + smoothed * 2 + next_pts) / 4.0
-                        final_points = smoothed[::3] 
+                        final_points = smoothed[::3]
                     else:
                         final_points = raw_points
 
@@ -239,18 +239,23 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                 doc.write(buf)
                 return buf.getvalue().encode('utf-8')
         
+    # ==========================================
+    # TRUE BEZIER SVG & EPS WRITER
+    # ==========================================
     elif target_fmt in ["SVG", "EPS"]:
         svg_w, svg_h = int(image.shape[1] / scale_factor), int(image.shape[0] / scale_factor)
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}" width="{svg_w}px" height="{svg_h}px">']
         
-        # --- THE EPS FIX: INJECT SOLID WHITE BACKGROUND ---
-        # Prevents EPS files from rendering as a solid black block of ink
         if target_fmt == "EPS":
             svg_lines.append(f'<rect width="100%" height="100%" fill="white"/>')
             
-        # Thicken lines dynamically so EPS paths aren't invisible hairlines
         dynamic_stroke = max(1.5, svg_w / 800)
+        fill_color = "black" if is_filled else "none"
+        stroke_color = "none" if is_filled else "black"
         
+        # We merge all paths into a single master string to trigger "evenodd" cutout math
+        combined_path_d = ""
+
         if hierarchy is not None:
             for cnt in contours:
                 if cv2.contourArea(cnt) > (img_area * (scale_factor**2)) * 0.95:
@@ -266,40 +271,59 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                         (cx, cy), r = cv2.minEnclosingCircle(cnt)
                         is_perfect_circle = True
 
-                fill_color = "black" if is_filled else "none"
-                stroke_color = "none" if is_filled else "black"
-
                 if is_perfect_circle:
                     real_cx = cx / scale_factor
                     real_cy = cy / scale_factor
                     real_r = r / scale_factor
-                    svg_lines.append(f'<circle cx="{real_cx:.4f}" cy="{real_cy:.4f}" r="{real_r:.4f}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="{dynamic_stroke:.2f}"/>')
+                    # Native SVG command for a mathematically perfect circle
+                    combined_path_d += f"M {real_cx - real_r},{real_cy} A {real_r},{real_r} 0 1,0 {real_cx + real_r},{real_cy} A {real_r},{real_r} 0 1,0 {real_cx - real_r},{real_cy} Z "
+                    
                 elif "Inkscape Trace" in mode:
                     raw_points = np.array([pt[0] for pt in cnt], dtype=float)
                     n = len(raw_points)
-                    if n >= 6:
+                    
+                    if n >= 4:
                         smoothed = raw_points
-                        for _ in range(5):
+                        for _ in range(3):
                             prev_pts = np.roll(smoothed, 1, axis=0)
                             next_pts = np.roll(smoothed, -1, axis=0)
                             smoothed = (prev_pts + smoothed * 2 + next_pts) / 4.0
-                        final_points = smoothed[::3]
-                    else:
-                        final_points = raw_points
                         
-                    points = final_points.reshape(-1, 2)
-                    if len(points) >= 3:
-                        path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
-                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="{dynamic_stroke:.2f}"/>')
+                        points = smoothed[::2] 
+                        
+                        # --- THE BEZIER UPGRADE ---
+                        # Generates TRUE smooth quadratic curves instead of jagged lines
+                        start_pt = ((points[-1][0] + points[0][0]) / 2, (points[-1][1] + points[0][1]) / 2)
+                        path_str = f"M {start_pt[0]/scale_factor},{start_pt[1]/scale_factor} "
+                        
+                        for i in range(len(points)):
+                            p_curr = points[i]
+                            p_next = points[(i + 1) % len(points)]
+                            mid_pt = ((p_curr[0] + p_next[0]) / 2, (p_curr[1] + p_next[1]) / 2)
+                            
+                            # Write the Q (Quadratic Bezier) mathematical coordinates
+                            ctrl_x, ctrl_y = p_curr[0]/scale_factor, p_curr[1]/scale_factor
+                            dest_x, dest_y = mid_pt[0]/scale_factor, mid_pt[1]/scale_factor
+                            path_str += f"Q {ctrl_x},{ctrl_y} {dest_x},{dest_y} "
+                        
+                        combined_path_d += path_str + "Z "
+                    else:
+                        points = raw_points.reshape(-1, 2)
+                        if len(points) >= 3:
+                            combined_path_d += "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z "
                 else:
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
                     points = approx_points.reshape(-1, 2)
                     
                     if len(points) >= 3:
-                        path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
-                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="{dynamic_stroke:.2f}"/>')
-                    
+                        combined_path_d += "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z "
+        
+        if combined_path_d:
+            # --- THE HOLE CUTOUT UPGRADE ---
+            # 'fill-rule="evenodd"' automatically punches holes out of donut/O shapes!
+            svg_lines.append(f'<path d="{combined_path_d.strip()}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="{dynamic_stroke:.2f}" fill-rule="evenodd"/>')
+            
         svg_lines.append('</svg>')
         svg_output = "\n".join(svg_lines).encode('utf-8')
         
