@@ -106,17 +106,13 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
     scale_factor = 1.0 
     MAX_SAFE_PIXELS = 4_000_000 
     
-    # --- NEW MODE: Force Spline Curve logic ---
-    if "Smooth Curves" in mode:
+    # --- NEW: INKSCAPE PERFECT TRACE EMULATOR ---
+    if "Inkscape Trace" in mode:
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
         _, processed = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        contour_mode = cv2.CHAIN_APPROX_TC89_KCOS # Keeps point density high on curves
-        epsilon_factor = epsilon_slider / 2.0 # Tighter constraint to prevent spline wobble
-        
-    elif "Trace Bitmap" in mode:
-        _, processed = cv2.threshold(image, 128, 255, cv2.THRESH_BINARY_INV)
-        contour_mode = cv2.CHAIN_APPROX_TC89_KCOS
-        epsilon_factor = 0.0005 
+        # We must use CHAIN_APPROX_NONE to get every single pixel for our smoothing math
+        contour_mode = cv2.CHAIN_APPROX_NONE 
+        epsilon_factor = epsilon_slider 
 
     elif "High Precision" in mode:
         ideal_scale = 4.0
@@ -182,11 +178,26 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     else:
                         msp.add_circle(center=(real_cx, real_cy), radius=real_r)
                 
-                # --- NEW: TRUE SPLINE CAD OUTPUT ---
-                elif "Smooth Curves" in mode and not is_filled:
-                    epsilon = epsilon_factor * perimeter
-                    approx_points = cv2.approxPolyDP(cnt, epsilon, True)
-                    points = [((pt[0][0] / scale_factor), -(pt[0][1] / scale_factor)) for pt in approx_points]
+                # --- TRUE INKSCAPE TRACE SPLINE ALGORITHM ---
+                elif "Inkscape Trace" in mode and not is_filled:
+                    # 1. Extract raw points
+                    raw_points = np.array([pt[0] for pt in cnt], dtype=float)
+                    n = len(raw_points)
+                    
+                    if n >= 6:
+                        # 2. Laplacian Mathematical Smoothing (Melts the pixel stairs)
+                        smoothed = raw_points
+                        for _ in range(5): # 5 passes of curve smoothing
+                            prev_pts = np.roll(smoothed, 1, axis=0)
+                            next_pts = np.roll(smoothed, -1, axis=0)
+                            smoothed = (prev_pts + smoothed * 2 + next_pts) / 4.0
+                        
+                        # 3. Decimate smoothly to keep the CAD file fast and responsive
+                        final_points = smoothed[::3]
+                    else:
+                        final_points = raw_points
+
+                    points = [((pt[0] / scale_factor), -(pt[1] / scale_factor)) for pt in final_points]
                     
                     if len(points) >= 3:
                         try:
@@ -194,7 +205,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                             spline = msp.add_spline(fit_points=points)
                             spline.closed = True
                         except:
-                            # Fallback just in case point geometry fails the spline math
                             msp.add_lwpolyline(points, close=True)
                 
                 else:
@@ -240,6 +250,23 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     real_cy = cy / scale_factor
                     real_r = r / scale_factor
                     svg_lines.append(f'<circle cx="{real_cx:.4f}" cy="{real_cy:.4f}" r="{real_r:.4f}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
+                elif "Inkscape Trace" in mode:
+                    raw_points = np.array([pt[0] for pt in cnt], dtype=float)
+                    n = len(raw_points)
+                    if n >= 6:
+                        smoothed = raw_points
+                        for _ in range(5):
+                            prev_pts = np.roll(smoothed, 1, axis=0)
+                            next_pts = np.roll(smoothed, -1, axis=0)
+                            smoothed = (prev_pts + smoothed * 2 + next_pts) / 4.0
+                        final_points = smoothed[::3]
+                    else:
+                        final_points = raw_points
+                        
+                    points = final_points.reshape(-1, 2)
+                    if len(points) >= 3:
+                        path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
+                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
                 else:
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
@@ -314,10 +341,9 @@ if uploaded_files:
         vector_mode = st.selectbox(
             "Vector Tracing Style:", 
             [
-                "Smooth Curves (True CAD Splines)", 
+                "Inkscape Trace (Perfect Smooth Splines)", 
                 "Technical / Pixelated (Force Straight Lines)", 
                 "High Precision (Shape Recognition for QR/Dots)", 
-                "Trace Bitmap (Inkscape Quality Smooth Lines)", 
                 "Clean Digital Graphics (Sharp Corners)", 
                 "Outlines Only (Edge Detection)"
             ],
@@ -327,7 +353,7 @@ if uploaded_files:
         )
         
         epsilon_slider = 0.001
-        if is_vector and vector_mode in ["Smooth Curves (True CAD Splines)", "Technical / Pixelated (Force Straight Lines)", "Clean Digital Graphics (Sharp Corners)", "Outlines Only (Edge Detection)"]:
+        if is_vector and vector_mode in ["Technical / Pixelated (Force Straight Lines)", "Clean Digital Graphics (Sharp Corners)", "Outlines Only (Edge Detection)"]:
             slider_value = st.slider(
                 "Line Smoothing (Tolerance %)", 
                 min_value=0.0, 
