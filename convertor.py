@@ -99,14 +99,9 @@ st.markdown("""
 # 3. CORE VECTOR TRACING ENGINE
 # ==========================================
 def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_slider: float, contrast_threshold: int, master_dxf: Optional[Dict[str, Any]] = None):
-    """
-    Main engine for converting raster pixels into mathematical vectors or standard images.
-    Features dynamic RAM limits to prevent cloud server crashes.
-    """
     with Image.open(image_file) as img:
         img = ImageOps.exif_transpose(img) 
 
-        # --- Standard Image & PDF Output ---
         if target_fmt in ["JPG", "JPEG", "PNG", "WEBP", "BMP", "PDF"]:
             if target_fmt in ["JPG", "JPEG", "PDF"] and img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
@@ -114,17 +109,13 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                 img.save(buf, format="JPEG" if target_fmt == "JPG" else target_fmt)
                 return buf.getvalue()
             
-        # --- Pre-processing for Vectorization ---
         img_gray = img.convert("L")
         image = np.array(img_gray)
     
     img_area = image.shape[0] * image.shape[1]
     scale_factor = 1.0 
-    
-    # Dynamic RAM limit: Prevents OpenCV from crashing Streamlit's 1GB memory cap
     MAX_SAFE_PIXELS = 4_000_000 
     
-    # --- Tracing Algorithm Selection ---
     if "Inkscape Trace" in mode:
         blurred = cv2.GaussianBlur(image, (3, 3), 0)
         _, processed = cv2.threshold(blurred, contrast_threshold, 255, cv2.THRESH_BINARY_INV)
@@ -164,7 +155,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
     contours, hierarchy = cv2.findContours(processed, cv2.RETR_TREE, contour_mode)
     is_filled = "Solid" in mode
 
-    # --- DXF Grid Integration Setup ---
     offset_x, offset_y = 0.0, 0.0
     msp = None
     if master_dxf:
@@ -172,9 +162,6 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
         offset_x = master_dxf['offset_x']
         offset_y = master_dxf['offset_y']
 
-    # ==========================================
-    # DXF WRITER
-    # ==========================================
     if target_fmt == "DXF":
         if not msp:
             doc = ezdxf.new('R2010')
@@ -218,7 +205,7 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                             prev_pts = np.roll(smoothed, 1, axis=0)
                             next_pts = np.roll(smoothed, -1, axis=0)
                             smoothed = (prev_pts + smoothed * 2 + next_pts) / 4.0
-                        final_points = smoothed[::3]
+                        final_points = smoothed[::3] 
                     else:
                         final_points = raw_points
 
@@ -252,14 +239,17 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                 doc.write(buf)
                 return buf.getvalue().encode('utf-8')
         
-    # ==========================================
-    # SVG & EPS WRITER
-    # ==========================================
     elif target_fmt in ["SVG", "EPS"]:
         svg_w, svg_h = int(image.shape[1] / scale_factor), int(image.shape[0] / scale_factor)
-        
-        # --- THE FIX: Explicit width and height attributes are critical for CairoSVG EPS compilation ---
         svg_lines = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}" width="{svg_w}px" height="{svg_h}px">']
+        
+        # --- THE EPS FIX: INJECT SOLID WHITE BACKGROUND ---
+        # Prevents EPS files from rendering as a solid black block of ink
+        if target_fmt == "EPS":
+            svg_lines.append(f'<rect width="100%" height="100%" fill="white"/>')
+            
+        # Thicken lines dynamically so EPS paths aren't invisible hairlines
+        dynamic_stroke = max(1.5, svg_w / 800)
         
         if hierarchy is not None:
             for cnt in contours:
@@ -283,7 +273,7 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     real_cx = cx / scale_factor
                     real_cy = cy / scale_factor
                     real_r = r / scale_factor
-                    svg_lines.append(f'<circle cx="{real_cx:.4f}" cy="{real_cy:.4f}" r="{real_r:.4f}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
+                    svg_lines.append(f'<circle cx="{real_cx:.4f}" cy="{real_cy:.4f}" r="{real_r:.4f}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="{dynamic_stroke:.2f}"/>')
                 elif "Inkscape Trace" in mode:
                     raw_points = np.array([pt[0] for pt in cnt], dtype=float)
                     n = len(raw_points)
@@ -300,7 +290,7 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     points = final_points.reshape(-1, 2)
                     if len(points) >= 3:
                         path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
-                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
+                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="{dynamic_stroke:.2f}"/>')
                 else:
                     epsilon = epsilon_factor * perimeter
                     approx_points = cv2.approxPolyDP(cnt, epsilon, True)
@@ -308,21 +298,16 @@ def process_raster(image_file: io.BytesIO, target_fmt: str, mode: str, epsilon_s
                     
                     if len(points) >= 3:
                         path_data = "M " + " L ".join([f"{x / scale_factor},{y / scale_factor}" for x, y in points]) + " Z"
-                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="1"/>')
+                        svg_lines.append(f'<path d="{path_data}" fill="{fill_color}" stroke="{stroke_color}" stroke-width="{dynamic_stroke:.2f}"/>')
                     
         svg_lines.append('</svg>')
         svg_output = "\n".join(svg_lines).encode('utf-8')
         
-        # Compile EPS via Cairo backend
         if target_fmt == "EPS":
             return cairosvg.svg2eps(bytestring=svg_output)
         return svg_output
 
-# ==========================================
-# FILE PIPELINE ROUTERS
-# ==========================================
 def process_svg(file_bytes: bytes, target_fmt: str, mode: str, epsilon_slider: float, contrast_threshold: int, master_dxf=None):
-    """Handles native SVG inputs or routes them through the raster engine for DXF tracing."""
     if target_fmt == "DXF" and master_dxf:
         png_bytes = cairosvg.svg2png(bytestring=file_bytes, output_width=1500) 
         with io.BytesIO(png_bytes) as pseudo_file:
@@ -338,7 +323,6 @@ def process_svg(file_bytes: bytes, target_fmt: str, mode: str, epsilon_slider: f
             return process_raster(pseudo_file, target_fmt, mode, epsilon_slider, contrast_threshold)
 
 def process_dxf(file_bytes: bytes, target_fmt: str) -> bytes:
-    """Renders CAD files into standard images using Matplotlib backend."""
     doc = ezdxf.read(io.StringIO(file_bytes.decode('utf-8')))
     msp = doc.modelspace()
     fig = plt.figure()
@@ -445,9 +429,7 @@ if uploaded_files:
         
         with st.status(f"Processing {len(uploaded_files)} files...", expanded=True) as status:
             try:
-                # ==========================================
                 # PDF MULTI-PAGE COMBINER
-                # ==========================================
                 if target_format == "PDF" and len(uploaded_files) > 1:
                     images_for_pdf = []
                     for uploaded_file in uploaded_files:
@@ -475,9 +457,7 @@ if uploaded_files:
                     else:
                         status.update(label="No valid images found to combine.", state="error")
                 
-                # ==========================================
                 # MASTER DXF GRID COMPILER
-                # ==========================================
                 elif target_format == "DXF" and combine_dxf and len(uploaded_files) > 1:
                     st.write("Combining files into a single master DXF grid...")
                     master_doc = ezdxf.new('R2010')
@@ -511,7 +491,6 @@ if uploaded_files:
                             success_count += 1
                             row_max_h = max(row_max_h, h)
                             
-                            # Responsive Layout Engine
                             PADDING = max(w, h) * 0.15 
                             if PADDING < 20: PADDING = 20
                             
@@ -540,9 +519,7 @@ if uploaded_files:
                     else:
                         status.update(label="No valid files were processed for the grid.", state="error", expanded=True)
 
-                # ==========================================
                 # INDIVIDUAL FILES & BATCH ZIP DOWNLOADER
-                # ==========================================
                 else:
                     zip_buffer = io.BytesIO()
                     success_count = 0
